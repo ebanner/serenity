@@ -58,6 +58,10 @@ There is also documentation for installing the build prerequisites for some less
 * [Other Linux distributions and \*NIX systems](BuildInstructionsOther.md)
 * [macOS](BuildInstructionsMacOS.md)
 
+## Get the code
+
+Clone the code to your local machine
+
 ## Build
 
 In order to build SerenityOS you will first need to build the toolchain by running the following command:
