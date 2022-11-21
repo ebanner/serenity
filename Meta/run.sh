@@ -3,6 +3,7 @@
 
 set -e
 
+
 die() {
     echo "die: $*"
     exit 1
