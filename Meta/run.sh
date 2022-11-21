@@ -1,4 +1,4 @@
-#!/bin/sh 
+#!/bin/sh
 # shellcheck disable=SC2086 # FIXME: fix these globing warnings
 
 set -e
@@ -8,7 +8,7 @@ die() {
     exit 1
 }
 
-SCRIPT_DIR="$(dirname "${0}")"
+SCRIPT_DIR="$(dirname "${0}")" 
 
 # https://www.shellcheck.net/wiki/SC1090 No need to shellcheck private config.
 # shellcheck source=/dev/null
