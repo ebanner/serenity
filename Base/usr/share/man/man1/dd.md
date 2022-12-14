@@ -5,7 +5,7 @@ dd - copy blocks of data
 ## Synopsis
 
 ```**sh
-$ dd if=[inputfile] of=[outputfile] [args...]
+$ dd if=[input_file] of=[output_file] [args...]
 ```
 
 ## Description
