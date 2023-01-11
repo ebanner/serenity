@@ -8,6 +8,7 @@
  */
 
 #include "HexEditorWidget.h"
+#include "AK/Forward.h"
 #include "FindDialog.h"
 #include "GoToOffsetDialog.h"
 #include "SearchResultsModel.h"
@@ -298,6 +299,8 @@ void HexEditorWidget::update_inspector_values(size_t position)
         unsigned_64_bit_int = (unsigned_64_bit_int << (8 * bytes_left_to_read));
     }
 
+    Vector<u8> selected_bytes = m_editor->get_selected_bytes();
+
     // Populate the model
     NonnullRefPtr<ValueInspectorModel> value_inspector_model = make_ref_counted<ValueInspectorModel>(m_value_inspector_little_endian);
     if (byte_read_count >= 1) {
@@ -368,7 +371,7 @@ void HexEditorWidget::update_inspector_values(size_t position)
     if (byte_read_count % 2 == 0) {
         Utf16View utf16_view { Span<u16 const> { reinterpret_cast<u16 const*>(&unsigned_64_bit_int), 4 } };
         size_t valid_code_units;
-        utf16_view.validate(valid_code_units);
+        utf8_view.validate(valid_code_units);
         if (valid_code_units == 0)
             value_inspector_model->set_parsed_value(ValueInspectorModel::ValueType::UTF16, "");
         else
@@ -376,6 +379,27 @@ void HexEditorWidget::update_inspector_values(size_t position)
     } else {
         value_inspector_model->set_parsed_value(ValueInspectorModel::ValueType::UTF16, "");
     }
+
+    StringBuilder ascii_string_builder;
+    for (size_t i = 0; i < selected_bytes.size(); i++) {
+        char byte_char = static_cast<char>(selected_bytes[i]);
+
+        if (!is_ascii_control(byte_char) && is_ascii(byte_char)) {
+            ascii_string_builder.append(byte_char);
+        } else {
+            ascii_string_builder.append(' ');
+        }
+    }
+
+    value_inspector_model->set_parsed_value(ValueInspectorModel::ValueType::ASCIIString, ascii_string_builder.to_string());
+
+    Utf8View utf8_string_view { ReadonlyBytes { selected_bytes } };
+    utf8_string_view.validate(valid_bytes);
+    if (valid_bytes == 0)
+        value_inspector_model->set_parsed_value(ValueInspectorModel::ValueType::UTF8String, "");
+    else
+        // FIXME: replace control chars with something else - we don't want line breaks here ;)
+        value_inspector_model->set_parsed_value(ValueInspectorModel::ValueType::UTF8String, utf8_string_view.as_string());
 
     // FIXME: Parse as other values like Timestamp etc
 
