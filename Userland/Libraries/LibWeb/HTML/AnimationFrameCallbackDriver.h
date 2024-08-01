@@ -9,8 +9,8 @@
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/IDAllocator.h>
+#include <LibCore/Timer.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
-#include <LibWeb/Platform/Timer.h>
 
 namespace Web::HTML {
 
@@ -19,7 +19,7 @@ struct AnimationFrameCallbackDriver {
 
     AnimationFrameCallbackDriver()
     {
-        m_timer = Platform::Timer::create_single_shot(16, [] {
+        m_timer = Core::Timer::create_single_shot(16, [] {
             HTML::main_thread_event_loop().schedule();
         });
     }
@@ -43,11 +43,11 @@ struct AnimationFrameCallbackDriver {
         return true;
     }
 
-    void run()
+    void run(double now)
     {
         auto taken_callbacks = move(m_callbacks);
         for (auto& [id, callback] : taken_callbacks)
-            callback(id);
+            callback(now);
     }
 
     bool has_callbacks() const
@@ -56,9 +56,9 @@ struct AnimationFrameCallbackDriver {
     }
 
 private:
-    HashMap<i32, Callback> m_callbacks;
+    OrderedHashMap<i32, Callback> m_callbacks;
     IDAllocator m_id_allocator;
-    RefPtr<Platform::Timer> m_timer;
+    RefPtr<Core::Timer> m_timer;
 };
 
 }

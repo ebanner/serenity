@@ -21,7 +21,7 @@ namespace Web::HTML {
 
 JS_DEFINE_ALLOCATOR(SharedImageRequest);
 
-JS::NonnullGCPtr<SharedImageRequest> SharedImageRequest::get_or_create(JS::Realm& realm, JS::NonnullGCPtr<Page> page, AK::URL const& url)
+JS::NonnullGCPtr<SharedImageRequest> SharedImageRequest::get_or_create(JS::Realm& realm, JS::NonnullGCPtr<Page> page, URL::URL const& url)
 {
     auto document = Bindings::host_defined_environment_settings_object(realm).responsible_document();
     VERIFY(document);
@@ -33,7 +33,7 @@ JS::NonnullGCPtr<SharedImageRequest> SharedImageRequest::get_or_create(JS::Realm
     return request;
 }
 
-SharedImageRequest::SharedImageRequest(JS::NonnullGCPtr<Page> page, AK::URL url, JS::NonnullGCPtr<DOM::Document> document)
+SharedImageRequest::SharedImageRequest(JS::NonnullGCPtr<Page> page, URL::URL url, JS::NonnullGCPtr<DOM::Document> document)
     : m_page(page)
     , m_url(move(url))
     , m_document(document)
@@ -85,17 +85,17 @@ void SharedImageRequest::fetch_image(JS::Realm& realm, JS::NonnullGCPtr<Fetch::I
         //        https://github.com/whatwg/html/issues/9355
         response = response->unsafe_response();
 
-        auto process_body = [this, request, response](ByteBuffer data) {
-            auto extracted_mime_type = response->header_list()->extract_mime_type().release_value_but_fixme_should_propagate_errors();
+        auto process_body = JS::create_heap_function(heap(), [this, request, response](ByteBuffer data) {
+            auto extracted_mime_type = response->header_list()->extract_mime_type();
             auto mime_type = extracted_mime_type.has_value() ? extracted_mime_type.value().essence().bytes_as_string_view() : StringView {};
             handle_successful_fetch(request->url(), mime_type, move(data));
-        };
-        auto process_body_error = [this](auto) {
+        });
+        auto process_body_error = JS::create_heap_function(heap(), [this](JS::Value) {
             handle_failed_fetch();
-        };
+        });
 
         if (response->body())
-            response->body()->fully_read(realm, move(process_body), move(process_body_error), JS::NonnullGCPtr { realm.global_object() }).release_value_but_fixme_should_propagate_errors();
+            response->body()->fully_read(realm, process_body, process_body_error, JS::NonnullGCPtr { realm.global_object() });
         else
             handle_failed_fetch();
     };
@@ -134,53 +134,55 @@ void SharedImageRequest::add_callbacks(Function<void()> on_finish, Function<void
     m_callbacks.append(move(callbacks));
 }
 
-void SharedImageRequest::handle_successful_fetch(AK::URL const& url_string, StringView mime_type, ByteBuffer data)
+void SharedImageRequest::handle_successful_fetch(URL::URL const& url_string, StringView mime_type, ByteBuffer data)
 {
     // AD-HOC: At this point, things gets very ad-hoc.
     // FIXME: Bring this closer to spec.
 
     bool const is_svg_image = mime_type == "image/svg+xml"sv || url_string.basename().ends_with(".svg"sv);
 
-    JS::GCPtr<DecodedImageData> image_data;
-
-    auto handle_failed_decode = [&] {
-        m_state = State::Failed;
-        for (auto& callback : m_callbacks) {
+    auto handle_failed_decode = [strong_this = JS::Handle(*this)](Error&) -> void {
+        strong_this->m_state = State::Failed;
+        for (auto& callback : strong_this->m_callbacks) {
             if (callback.on_fail)
                 callback.on_fail->function()();
         }
     };
 
+    auto handle_successful_decode = [](SharedImageRequest& self) {
+        self.m_state = State::Finished;
+        for (auto& callback : self.m_callbacks) {
+            if (callback.on_finish)
+                callback.on_finish->function()();
+        }
+        self.m_callbacks.clear();
+    };
+
     if (is_svg_image) {
         auto result = SVG::SVGDecodedImageData::create(m_document->realm(), m_page, url_string, data);
-        if (result.is_error())
-            return handle_failed_decode();
+        if (result.is_error()) {
+            handle_failed_decode(result.error());
+        } else {
+            m_image_data = result.release_value();
+            handle_successful_decode(*this);
+        }
+        return;
+    }
 
-        image_data = result.release_value();
-    } else {
-        auto result = Web::Platform::ImageCodecPlugin::the().decode_image(data.bytes());
-        if (!result.has_value())
-            return handle_failed_decode();
-
+    auto handle_successful_bitmap_decode = [strong_this = JS::Handle(*this), handle_successful_decode = move(handle_successful_decode)](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
         Vector<AnimatedBitmapDecodedImageData::Frame> frames;
-        for (auto& frame : result.value().frames) {
+        for (auto& frame : result.frames) {
             frames.append(AnimatedBitmapDecodedImageData::Frame {
                 .bitmap = Gfx::ImmutableBitmap::create(*frame.bitmap),
                 .duration = static_cast<int>(frame.duration),
             });
         }
-        image_data = AnimatedBitmapDecodedImageData::create(m_document->realm(), move(frames), result.value().loop_count, result.value().is_animated).release_value_but_fixme_should_propagate_errors();
-    }
+        strong_this->m_image_data = AnimatedBitmapDecodedImageData::create(strong_this->m_document->realm(), move(frames), result.loop_count, result.is_animated).release_value_but_fixme_should_propagate_errors();
+        handle_successful_decode(*strong_this);
+        return {};
+    };
 
-    m_image_data = image_data;
-
-    m_state = State::Finished;
-
-    for (auto& callback : m_callbacks) {
-        if (callback.on_finish)
-            callback.on_finish->function()();
-    }
-    m_callbacks.clear();
+    (void)Web::Platform::ImageCodecPlugin::the().decode_image(data.bytes(), move(handle_successful_bitmap_decode), move(handle_failed_decode));
 }
 
 void SharedImageRequest::handle_failed_fetch()

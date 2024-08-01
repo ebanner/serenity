@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/OwnPtr.h>
+#include <AK/Span.h>
 #include <Kernel/Bus/PCI/Access.h>
 #include <Kernel/Bus/PCI/Device.h>
 #include <Kernel/Interrupts/IRQHandler.h>
@@ -49,12 +50,12 @@ private:
     bool determine_supported_version() const;
 
     struct [[gnu::packed]] TXDescriptor {
-        volatile u16 frame_length; // top 2 bits are reserved
-        volatile u16 flags;
-        volatile u16 vlan_tag;
-        volatile u16 vlan_flags;
-        volatile u32 buffer_address_low;
-        volatile u32 buffer_address_high;
+        u16 volatile frame_length; // top 2 bits are reserved
+        u16 volatile flags;
+        u16 volatile vlan_tag;
+        u16 volatile vlan_flags;
+        u32 volatile buffer_address_low;
+        u32 volatile buffer_address_high;
 
         // flags bit field
         static constexpr u16 Ownership = 0x8000u;
@@ -67,12 +68,12 @@ private:
     static_assert(AssertSize<TXDescriptor, 16u>());
 
     struct [[gnu::packed]] RXDescriptor {
-        volatile u16 buffer_size; // top 2 bits are reserved
-        volatile u16 flags;
-        volatile u16 vlan_tag;
-        volatile u16 vlan_flags;
-        volatile u32 buffer_address_low;
-        volatile u32 buffer_address_high;
+        u16 volatile buffer_size; // top 2 bits are reserved
+        u16 volatile flags;
+        u16 volatile vlan_tag;
+        u16 volatile vlan_flags;
+        u32 volatile buffer_address_low;
+        u32 volatile buffer_address_high;
 
         // flags bit field
         static constexpr u16 Ownership = 0x8000u;
@@ -128,6 +129,7 @@ private:
     StringView possible_device_name();
 
     void reset();
+    void pci_commit();
     void read_mac_address();
     void set_phy_speed();
     void start_hardware();
@@ -136,6 +138,9 @@ private:
     void configure_phy();
     void configure_phy_b_1();
     void configure_phy_b_2();
+    void configure_phy_c_1();
+    void configure_phy_c_2();
+    void configure_phy_c_3();
     void configure_phy_e_2();
     void configure_phy_h_1();
     void configure_phy_h_2();
@@ -145,6 +150,9 @@ private:
     void hardware_quirks();
     void hardware_quirks_b_1();
     void hardware_quirks_b_2();
+    void hardware_quirks_c_1();
+    void hardware_quirks_c_2();
+    void hardware_quirks_c_3();
     void hardware_quirks_e_2();
     void hardware_quirks_h();
 
@@ -168,7 +176,7 @@ private:
         u16 address;
         u16 data;
     };
-    void phy_out_batch(const PhyRegister[], size_t length);
+    void phy_out_batch(ReadonlySpan<PhyRegister>);
 
     void extended_phy_out(u8 address, u16 data);
     u16 extended_phy_in(u8 address);
@@ -177,7 +185,7 @@ private:
         u16 clear;
         u16 set;
     };
-    void extended_phy_initialize(const EPhyUpdate[], size_t length);
+    void extended_phy_initialize(ReadonlySpan<EPhyUpdate>);
 
     void eri_out(u32 address, u32 mask, u32 data, u32 type);
     u32 eri_in(u32 address, u32 type);
@@ -187,7 +195,7 @@ private:
         u16 mask;
         u32 value;
     };
-    void exgmac_out_batch(const ExgMacRegister[], size_t length);
+    void exgmac_out_batch(ReadonlySpan<ExgMacRegister>);
 
     void csi_out(u32 address, u32 data);
     u32 csi_in(u32 address);

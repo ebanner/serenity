@@ -7,26 +7,30 @@
 
 #pragma once
 
-#include <AK/URL.h>
 #include <LibJS/Forward.h>
+#include <LibURL/URL.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/Origin.h>
 #include <LibWeb/HTML/Scripting/ModuleMap.h>
+#include <LibWeb/HTML/Scripting/SerializedEnvironmentSettingsObject.h>
 
 namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#environment
-struct Environment {
-    virtual ~Environment() = default;
+struct Environment : public JS::Cell {
+    JS_CELL(Environment, JS::Cell);
+
+public:
+    virtual ~Environment() override;
 
     // An id https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-id
     String id;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-creation-url
-    AK::URL creation_url;
+    URL::URL creation_url;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-top-level-creation-url
-    AK::URL top_level_creation_url;
+    URL::URL top_level_creation_url;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-top-level-origin
     Origin top_level_origin;
@@ -38,11 +42,9 @@ struct Environment {
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-execution-ready-flag
     bool execution_ready { false };
-};
 
-enum class CanUseCrossOriginIsolatedAPIs {
-    No,
-    Yes,
+protected:
+    virtual void visit_edges(Cell::Visitor&) override;
 };
 
 enum class RunScriptDecision {
@@ -51,11 +53,10 @@ enum class RunScriptDecision {
 };
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#environment-settings-object
-struct EnvironmentSettingsObject
-    : public JS::Cell
-    , public Environment {
-    JS_CELL(EnvironmentSettingsObject, JS::Cell);
+struct EnvironmentSettingsObject : public Environment {
+    JS_CELL(EnvironmentSettingsObject, Environment);
 
+public:
     virtual ~EnvironmentSettingsObject() override;
     virtual void initialize(JS::Realm&) override;
 
@@ -72,7 +73,7 @@ struct EnvironmentSettingsObject
     virtual String api_url_character_encoding() = 0;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#api-base-url
-    virtual AK::URL api_base_url() = 0;
+    virtual URL::URL api_base_url() = 0;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-settings-object-origin
     virtual Origin origin() = 0;
@@ -83,7 +84,7 @@ struct EnvironmentSettingsObject
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-settings-object-cross-origin-isolated-capability
     virtual CanUseCrossOriginIsolatedAPIs cross_origin_isolated_capability() = 0;
 
-    AK::URL parse_url(StringView);
+    URL::URL parse_url(StringView);
 
     JS::Realm& realm();
     JS::Object& global_object();
@@ -115,6 +116,8 @@ struct EnvironmentSettingsObject
 
     void disallow_further_import_maps();
 
+    SerializedEnvironmentSettingsObject serialize();
+
 protected:
     explicit EnvironmentSettingsObject(NonnullOwnPtr<JS::ExecutionContext>);
 
@@ -124,7 +127,7 @@ private:
     NonnullOwnPtr<JS::ExecutionContext> m_realm_execution_context;
     JS::GCPtr<ModuleMap> m_module_map;
 
-    EventLoop* m_responsible_event_loop { nullptr };
+    JS::GCPtr<EventLoop> m_responsible_event_loop;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#outstanding-rejected-promises-weak-set
     // The outstanding rejected promises weak set must not create strong references to any of its members, and implementations are free to limit its size, e.g. by removing old entries from it when new ones are added.

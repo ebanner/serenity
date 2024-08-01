@@ -4,10 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/Function.h>
-#include <AK/HashTable.h>
 #include <AK/Math.h>
-#include <AK/QuickSort.h>
 #include <AK/StringBuilder.h>
 #include <AK/TypeCasts.h>
 #include <LibGfx/BoundingBox.h>
@@ -80,7 +77,7 @@ void Path::elliptical_arc_to(FloatPoint point, FloatSize radii, float x_axis_rot
 
     // Step 1 of out-of-range radii correction
     if (rx == 0.0 || ry == 0.0) {
-        append_segment<LineSegment>(next_point);
+        append_segment<PathSegment::LineTo>(next_point);
         return;
     }
 
@@ -161,6 +158,56 @@ void Path::elliptical_arc_to(FloatPoint point, FloatSize radii, float x_axis_rot
         theta_delta);
 }
 
+void Path::quad(FloatQuad const& quad)
+{
+    move_to(quad.p1());
+    line_to(quad.p2());
+    line_to(quad.p3());
+    line_to(quad.p4());
+    close();
+}
+
+void Path::rounded_rect(FloatRect const& rect, CornerRadius top_left, CornerRadius top_right, CornerRadius bottom_right, CornerRadius bottom_left)
+{
+    auto x = rect.x();
+    auto y = rect.y();
+    auto width = rect.width();
+    auto height = rect.height();
+
+    if (top_left)
+        move_to({ x + top_left.horizontal_radius, y });
+    else
+        move_to({ x, y });
+
+    if (top_right) {
+        horizontal_line_to(x + width - top_right.horizontal_radius);
+        elliptical_arc_to({ x + width, y + top_right.horizontal_radius }, { top_right.horizontal_radius, top_right.vertical_radius }, 0, false, true);
+    } else {
+        horizontal_line_to(x + width);
+    }
+
+    if (bottom_right) {
+        vertical_line_to(y + height - bottom_right.vertical_radius);
+        elliptical_arc_to({ x + width - bottom_right.horizontal_radius, y + height }, { bottom_right.horizontal_radius, bottom_right.vertical_radius }, 0, false, true);
+    } else {
+        vertical_line_to(y + height);
+    }
+
+    if (bottom_left) {
+        horizontal_line_to(x + bottom_left.horizontal_radius);
+        elliptical_arc_to({ x, y + height - bottom_left.vertical_radius }, { bottom_left.horizontal_radius, bottom_left.vertical_radius }, 0, false, true);
+    } else {
+        horizontal_line_to(x);
+    }
+
+    if (top_left) {
+        vertical_line_to(y + top_left.vertical_radius);
+        elliptical_arc_to({ x + top_left.horizontal_radius, y }, { top_left.horizontal_radius, top_left.vertical_radius }, 0, false, true);
+    } else {
+        vertical_line_to(y);
+    }
+}
+
 void Path::text(Utf8View text, Font const& font)
 {
     if (!is<ScaledFont>(font)) {
@@ -192,7 +239,7 @@ Path Path::place_text_along(Utf8View text, Font const& font) const
         return {};
     }
 
-    auto& lines = split_lines();
+    auto lines = split_lines();
     auto next_point_for_offset = [&, line_index = 0U, distance_along_path = 0.0f, last_line_length = 0.0f](float offset) mutable -> Optional<FloatPoint> {
         while (line_index < lines.size() && offset > distance_along_path) {
             last_line_length = lines[line_index++].length();
@@ -247,126 +294,77 @@ Path Path::place_text_along(Utf8View text, Font const& font) const
     return result_path;
 }
 
-FloatPoint Path::last_point()
-{
-    FloatPoint last_point { 0, 0 };
-    if (!m_segments.is_empty())
-        last_point = m_segments.last()->point();
-    return last_point;
-}
-
 void Path::close()
 {
-    if (m_segments.size() <= 1)
-        return;
-
-    auto last_point = m_segments.last()->point();
-
-    for (ssize_t i = m_segments.size() - 1; i >= 0; --i) {
-        auto& segment = m_segments[i];
-        if (segment->type() == Segment::Type::MoveTo) {
-            if (last_point == segment->point())
-                return;
-            append_segment<LineSegment>(segment->point());
-            invalidate_split_lines();
-            return;
+    // If there's no `moveto` starting this subpath assume the start is (0, 0).
+    FloatPoint first_point_in_subpath = { 0, 0 };
+    for (auto it = end(); it-- != begin();) {
+        auto segment = *it;
+        if (segment.command() == PathSegment::MoveTo) {
+            first_point_in_subpath = segment.point();
+            break;
         }
     }
+    if (first_point_in_subpath != last_point())
+        line_to(first_point_in_subpath);
 }
 
 void Path::close_all_subpaths()
 {
-    if (m_segments.size() <= 1)
-        return;
-
-    invalidate_split_lines();
-
-    Optional<FloatPoint> cursor, start_of_subpath;
-    bool is_first_point_in_subpath { false };
-
-    auto close_previous_subpath = [&] {
-        if (cursor.has_value() && !is_first_point_in_subpath) {
-            // This is a move from a subpath to another
-            // connect the two ends of this subpath before
-            // moving on to the next one
-            VERIFY(start_of_subpath.has_value());
-
-            append_segment<MoveSegment>(cursor.value());
-            append_segment<LineSegment>(start_of_subpath.value());
+    auto it = begin();
+    // Note: Get the end outside the loop as closing subpaths will move the end.
+    auto end = this->end();
+    while (it < end) {
+        // If there's no `moveto` starting this subpath assume the start is (0, 0).
+        FloatPoint first_point_in_subpath = { 0, 0 };
+        auto segment = *it;
+        if (segment.command() == PathSegment::MoveTo) {
+            first_point_in_subpath = segment.point();
+            ++it;
         }
-    };
-
-    auto segment_count = m_segments.size();
-    for (size_t i = 0; i < segment_count; i++) {
-        // Note: We need to use m_segments[i] as append_segment() may invalidate any references.
-        switch (m_segments[i]->type()) {
-        case Segment::Type::MoveTo: {
-            close_previous_subpath();
-            is_first_point_in_subpath = true;
-            cursor = m_segments[i]->point();
-            break;
+        // Find the end of the current subpath.
+        FloatPoint cursor = first_point_in_subpath;
+        while (it < end) {
+            auto segment = *it;
+            if (segment.command() == PathSegment::MoveTo)
+                break;
+            cursor = segment.point();
+            ++it;
         }
-        case Segment::Type::LineTo:
-        case Segment::Type::QuadraticBezierCurveTo:
-        case Segment::Type::CubicBezierCurveTo:
-            if (is_first_point_in_subpath) {
-                start_of_subpath = cursor;
-                is_first_point_in_subpath = false;
-            }
-            cursor = m_segments[i]->point();
-            break;
-        case Segment::Type::Invalid:
-            VERIFY_NOT_REACHED();
-            break;
+        // Close the subpath.
+        if (first_point_in_subpath != cursor) {
+            move_to(cursor);
+            line_to(first_point_in_subpath);
         }
     }
-
-    if (m_segments.last()->type() != Segment::Type::MoveTo)
-        close_previous_subpath();
 }
 
 ByteString Path::to_byte_string() const
 {
+    // Dumps this path as an SVG compatible string.
     StringBuilder builder;
-    builder.append("Path { "sv);
-    for (auto& segment : m_segments) {
-        switch (segment->type()) {
-        case Segment::Type::MoveTo:
-            builder.append("MoveTo"sv);
+    if (is_empty() || m_commands.first() != PathSegment::MoveTo)
+        builder.append("M 0,0"sv);
+    for (auto segment : *this) {
+        if (!builder.is_empty())
+            builder.append(' ');
+        switch (segment.command()) {
+        case PathSegment::MoveTo:
+            builder.append('M');
             break;
-        case Segment::Type::LineTo:
-            builder.append("LineTo"sv);
+        case PathSegment::LineTo:
+            builder.append('L');
             break;
-        case Segment::Type::QuadraticBezierCurveTo:
-            builder.append("QuadraticBezierCurveTo"sv);
+        case PathSegment::QuadraticBezierCurveTo:
+            builder.append('Q');
             break;
-        case Segment::Type::CubicBezierCurveTo:
-            builder.append("CubicBezierCurveTo"sv);
-            break;
-        case Segment::Type::Invalid:
-            builder.append("Invalid"sv);
-            break;
-        }
-        builder.appendff("({}", segment->point());
-
-        switch (segment->type()) {
-        case Segment::Type::QuadraticBezierCurveTo:
-            builder.append(", "sv);
-            builder.append(static_cast<QuadraticBezierCurveSegment const&>(*segment).through().to_byte_string());
-            break;
-        case Segment::Type::CubicBezierCurveTo:
-            builder.append(", "sv);
-            builder.append(static_cast<CubicBezierCurveSegment const&>(*segment).through_0().to_byte_string());
-            builder.append(", "sv);
-            builder.append(static_cast<CubicBezierCurveSegment const&>(*segment).through_1().to_byte_string());
-            break;
-        default:
+        case PathSegment::CubicBezierCurveTo:
+            builder.append('C');
             break;
         }
-
-        builder.append(") "sv);
+        for (auto point : segment.points())
+            builder.appendff(" {},{}", point.x(), point.y());
     }
-    builder.append('}');
     return builder.to_byte_string();
 }
 
@@ -381,88 +379,63 @@ void Path::segmentize_path()
     };
 
     FloatPoint cursor { 0, 0 };
-    for (auto& segment : m_segments) {
-        switch (segment->type()) {
-        case Segment::Type::MoveTo:
-            bounding_box.add_point(segment->point());
-            cursor = segment->point();
+    for (auto segment : *this) {
+        switch (segment.command()) {
+        case PathSegment::MoveTo:
+            bounding_box.add_point(segment.point());
             break;
-        case Segment::Type::LineTo: {
-            add_line(cursor, segment->point());
-            cursor = segment->point();
+        case PathSegment::LineTo: {
+            add_line(cursor, segment.point());
             break;
         }
-        case Segment::Type::QuadraticBezierCurveTo: {
-            auto control = static_cast<QuadraticBezierCurveSegment const&>(*segment).through();
-            Painter::for_each_line_segment_on_bezier_curve(control, cursor, segment->point(), [&](FloatPoint p0, FloatPoint p1) {
+        case PathSegment::QuadraticBezierCurveTo: {
+            Painter::for_each_line_segment_on_bezier_curve(segment.through(), cursor, segment.point(), [&](FloatPoint p0, FloatPoint p1) {
                 add_line(p0, p1);
             });
-            cursor = segment->point();
             break;
         }
-        case Segment::Type::CubicBezierCurveTo: {
-            auto& curve = static_cast<CubicBezierCurveSegment const&>(*segment);
-            auto control_0 = curve.through_0();
-            auto control_1 = curve.through_1();
-            Painter::for_each_line_segment_on_cubic_bezier_curve(control_0, control_1, cursor, segment->point(), [&](FloatPoint p0, FloatPoint p1) {
+        case PathSegment::CubicBezierCurveTo: {
+            Painter::for_each_line_segment_on_cubic_bezier_curve(segment.through_0(), segment.through_1(), cursor, segment.point(), [&](FloatPoint p0, FloatPoint p1) {
                 add_line(p0, p1);
             });
-            cursor = segment->point();
             break;
         }
-        case Segment::Type::Invalid:
-            VERIFY_NOT_REACHED();
         }
+        cursor = segment.point();
     }
 
-    m_split_lines = move(segments);
-    m_bounding_box = bounding_box;
+    m_split_lines = SplitLines { move(segments), bounding_box };
 }
 
 Path Path::copy_transformed(Gfx::AffineTransform const& transform) const
 {
     Path result;
-
-    for (auto const& segment : m_segments) {
-        switch (segment->type()) {
-        case Segment::Type::MoveTo:
-            result.move_to(transform.map(segment->point()));
-            break;
-        case Segment::Type::LineTo: {
-            result.line_to(transform.map(segment->point()));
-            break;
-        }
-        case Segment::Type::QuadraticBezierCurveTo: {
-            auto const& quadratic_segment = static_cast<QuadraticBezierCurveSegment const&>(*segment);
-            result.quadratic_bezier_curve_to(transform.map(quadratic_segment.through()), transform.map(segment->point()));
-            break;
-        }
-        case Segment::Type::CubicBezierCurveTo: {
-            auto const& cubic_segment = static_cast<CubicBezierCurveSegment const&>(*segment);
-            result.cubic_bezier_curve_to(transform.map(cubic_segment.through_0()), transform.map(cubic_segment.through_1()), transform.map(segment->point()));
-            break;
-        }
-        case Segment::Type::Invalid:
-            VERIFY_NOT_REACHED();
-        }
-    }
-
+    result.m_commands = m_commands;
+    result.m_points.ensure_capacity(m_points.size());
+    for (auto point : m_points)
+        result.m_points.unchecked_append(transform.map(point));
     return result;
 }
 
-void Path::add_path(Path const& other)
+void Path::transform(AffineTransform const& transform)
 {
-    m_segments.extend(other.m_segments);
+    for (auto& point : m_points)
+        point = transform.map(point);
+}
+
+void Path::append_path(Path const& path, AppendRelativeToLastPoint relative_to_last_point)
+{
+    auto previous_last_point = last_point();
+    auto new_points_start = m_points.size();
+    m_commands.extend(path.m_commands);
+    m_points.extend(path.m_points);
+    if (relative_to_last_point == AppendRelativeToLastPoint::Yes) {
+        for (size_t i = new_points_start; i < m_points.size(); i++)
+            m_points[i] += previous_last_point;
+    }
     invalidate_split_lines();
 }
 
-void Path::ensure_subpath(FloatPoint point)
-{
-    if (m_need_new_subpath && m_segments.is_empty()) {
-        move_to(point);
-        m_need_new_subpath = false;
-    }
-}
 template<typename T>
 struct RoundTrip {
     RoundTrip(ReadonlySpan<T> span)
@@ -498,7 +471,7 @@ Path Path::stroke_to_fill(float thickness) const
 
     VERIFY(thickness > 0);
 
-    auto& lines = split_lines();
+    auto lines = split_lines();
     if (lines.is_empty())
         return Path {};
 

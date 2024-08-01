@@ -23,6 +23,8 @@ public:
     explicit TableFormattingContext(LayoutState&, Box const&, FormattingContext* parent);
     ~TableFormattingContext();
 
+    void run_until_width_calculation(Box const&, AvailableSpace const& available_space);
+
     virtual void run(Box const&, LayoutMode, AvailableSpace const&) override;
     virtual CSSPixels automatic_content_width() const override;
     virtual CSSPixels automatic_content_height() const override;
@@ -136,7 +138,7 @@ private:
     };
 
     struct ConflictingEdge {
-        Node const* element;
+        JS::GCPtr<Node const> element;
         Painting::PaintableBox::ConflictingElementKind element_kind;
         ConflictingSide side;
         Optional<size_t> row;
@@ -146,7 +148,7 @@ private:
     static TableFormattingContext::ConflictingEdge const& winning_conflicting_edge(TableFormattingContext::ConflictingEdge const& a, TableFormattingContext::ConflictingEdge const& b);
 
     static const CSS::BorderData& border_data_conflicting_edge(ConflictingEdge const& conflicting_edge);
-    static const Painting::PaintableBox::BorderDataWithElementKind border_data_with_element_kind_from_conflicting_edge(ConflictingEdge const& conflicting_edge);
+    static Painting::PaintableBox::BorderDataWithElementKind const border_data_with_element_kind_from_conflicting_edge(ConflictingEdge const& conflicting_edge);
 
     class BorderConflictFinder {
     public:
@@ -164,12 +166,12 @@ private:
         void collect_table_box_conflicting_edges(Vector<ConflictingEdge>&, Cell const&, ConflictingSide) const;
 
         struct RowGroupInfo {
-            Node const* row_group;
+            JS::GCPtr<Node const> row_group;
             size_t start_index;
             size_t row_count;
         };
 
-        Vector<Node const*> m_col_elements_by_index;
+        Vector<JS::GCPtr<Node const>> m_col_elements_by_index;
         Vector<Optional<RowGroupInfo>> m_row_group_elements_by_index;
         TableFormattingContext const* m_context;
     };

@@ -13,7 +13,7 @@
 namespace JS {
 
 template<typename T>
-class HeapFunction final : public JS::Cell {
+class HeapFunction final : public Cell {
     JS_CELL(HeapFunction, Cell);
 
 public:
@@ -41,10 +41,10 @@ private:
     Function<T> m_function;
 };
 
-template<typename T>
-static NonnullGCPtr<HeapFunction<T>> create_heap_function(Heap& heap, Function<T> function)
+template<typename Callable, typename T = EquivalentFunctionType<Callable>>
+static NonnullGCPtr<HeapFunction<T>> create_heap_function(Heap& heap, Callable&& function)
 {
-    return HeapFunction<T>::create(heap, move(function));
+    return HeapFunction<T>::create(heap, Function<T> { forward<Callable>(function) });
 }
 
 }

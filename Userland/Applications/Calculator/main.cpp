@@ -5,7 +5,6 @@
  */
 
 #include "CalculatorWidget.h"
-#include <AK/URL.h>
 #include <LibCore/System.h>
 #include <LibCrypto/NumberTheory/ModularFunctions.h>
 #include <LibDesktop/Launcher.h>
@@ -20,6 +19,7 @@
 #include <LibGUI/Window.h>
 #include <LibGfx/Bitmap.h>
 #include <LibMain/Main.h>
+#include <LibURL/URL.h>
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
@@ -42,7 +42,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     window->set_resizable(false);
     window->resize(250, 215);
 
-    auto widget = TRY(Calculator::CalculatorWidget::create());
+    auto widget = TRY(Calculator::CalculatorWidget::try_create());
     window->set_main_widget(widget.ptr());
 
     window->set_icon(app_icon.bitmap_for_size(16));

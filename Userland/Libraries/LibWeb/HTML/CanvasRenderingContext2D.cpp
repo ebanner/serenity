@@ -16,6 +16,7 @@
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
 #include <LibWeb/HTML/HTMLCanvasElement.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
+#include <LibWeb/HTML/ImageBitmap.h>
 #include <LibWeb/HTML/ImageData.h>
 #include <LibWeb/HTML/Path2D.h>
 #include <LibWeb/HTML/TextMetrics.h>
@@ -198,7 +199,7 @@ Optional<Gfx::AntiAliasingPainter> CanvasRenderingContext2D::antialiased_painter
     return {};
 }
 
-void CanvasRenderingContext2D::fill_text(StringView text, float x, float y, Optional<double> max_width)
+void CanvasRenderingContext2D::bitmap_font_fill_text(StringView text, float x, float y, Optional<double> max_width)
 {
     if (max_width.has_value() && max_width.value() <= 0)
         return;
@@ -207,9 +208,8 @@ void CanvasRenderingContext2D::fill_text(StringView text, float x, float y, Opti
         auto& drawing_state = this->drawing_state();
         auto& base_painter = painter.underlying_painter();
 
-        auto font = current_font();
-
         // Create text rect from font
+        auto font = current_font();
         auto text_rect = Gfx::FloatRect(x, y, max_width.has_value() ? static_cast<float>(max_width.value()) : font->width(text), font->pixel_size());
 
         // Apply text align to text_rect
@@ -242,10 +242,72 @@ void CanvasRenderingContext2D::fill_text(StringView text, float x, float y, Opti
     });
 }
 
+Gfx::Path CanvasRenderingContext2D::text_path(StringView text, float x, float y, Optional<double> max_width)
+{
+    if (max_width.has_value() && max_width.value() <= 0)
+        return {};
+
+    auto& drawing_state = this->drawing_state();
+    auto font = current_font();
+
+    Gfx::Path path;
+    path.move_to({ x, y });
+    path.text(Utf8View { text }, *font);
+
+    auto text_width = path.bounding_box().width();
+    Gfx::AffineTransform transform = {};
+
+    // https://html.spec.whatwg.org/multipage/canvas.html#text-preparation-algorithm:
+    // 6. If maxWidth was provided and the hypothetical width of the inline box in the hypothetical line box
+    // is greater than maxWidth CSS pixels, then change font to have a more condensed font (if one is
+    // available or if a reasonably readable one can be synthesized by applying a horizontal scale
+    // factor to the font) or a smaller font, and return to the previous step.
+    if (max_width.has_value() && text_width > float(*max_width)) {
+        auto horizontal_scale = float(*max_width) / text_width;
+        transform = Gfx::AffineTransform {}.scale({ horizontal_scale, 1 });
+        text_width *= horizontal_scale;
+    }
+
+    // Apply text align
+    // FIXME: CanvasTextAlign::Start and CanvasTextAlign::End currently do not nothing for right-to-left languages:
+    //        https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-textalign-start
+    // Default alignment of draw_text is left so do nothing by CanvasTextAlign::Start and CanvasTextAlign::Left
+    if (drawing_state.text_align == Bindings::CanvasTextAlign::Center) {
+        transform = Gfx::AffineTransform {}.set_translation({ -text_width / 2, 0 }).multiply(transform);
+    }
+    if (drawing_state.text_align == Bindings::CanvasTextAlign::End || drawing_state.text_align == Bindings::CanvasTextAlign::Right) {
+        transform = Gfx::AffineTransform {}.set_translation({ -text_width, 0 }).multiply(transform);
+    }
+
+    // Apply text baseline
+    // FIXME: Implement CanvasTextBasline::Hanging, Bindings::CanvasTextAlign::Alphabetic and Bindings::CanvasTextAlign::Ideographic for real
+    //        right now they are just handled as textBaseline = top or bottom.
+    //        https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-textbaseline-hanging
+    // Default baseline of draw_text is top so do nothing by CanvasTextBaseline::Top and CanvasTextBasline::Hanging
+    if (drawing_state.text_baseline == Bindings::CanvasTextBaseline::Middle) {
+        transform = Gfx::AffineTransform {}.set_translation({ 0, font->pixel_size() / 2 }).multiply(transform);
+    }
+    if (drawing_state.text_baseline == Bindings::CanvasTextBaseline::Top || drawing_state.text_baseline == Bindings::CanvasTextBaseline::Hanging) {
+        transform = Gfx::AffineTransform {}.set_translation({ 0, font->pixel_size() }).multiply(transform);
+    }
+
+    transform = Gfx::AffineTransform { drawing_state.transform }.multiply(transform);
+    path = path.copy_transformed(transform);
+    return path;
+}
+
+void CanvasRenderingContext2D::fill_text(StringView text, float x, float y, Optional<double> max_width)
+{
+    if (is<Gfx::BitmapFont>(*current_font()))
+        return bitmap_font_fill_text(text, x, y, max_width);
+    fill_internal(text_path(text, x, y, max_width), Gfx::Painter::WindingRule::Nonzero);
+}
+
 void CanvasRenderingContext2D::stroke_text(StringView text, float x, float y, Optional<double> max_width)
 {
-    // FIXME: Stroke the text instead of filling it.
-    fill_text(text, x, y, max_width);
+    if (is<Gfx::BitmapFont>(*current_font()))
+        return bitmap_font_fill_text(text, x, y, max_width);
+    stroke_internal(text_path(text, x, y, max_width));
 }
 
 void CanvasRenderingContext2D::begin_path()
@@ -313,13 +375,13 @@ void CanvasRenderingContext2D::fill(Path2D& path, StringView fill_rule)
     return fill_internal(transformed_path, parse_fill_rule(fill_rule));
 }
 
-JS::GCPtr<ImageData> CanvasRenderingContext2D::create_image_data(int width, int height) const
+WebIDL::ExceptionOr<JS::NonnullGCPtr<ImageData>> CanvasRenderingContext2D::create_image_data(int width, int height, Optional<ImageDataSettings> const& settings) const
 {
-    return ImageData::create_with_size(realm(), width, height);
+    return ImageData::create(realm(), width, height, settings);
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-getimagedata
-WebIDL::ExceptionOr<JS::GCPtr<ImageData>> CanvasRenderingContext2D::get_image_data(int x, int y, int width, int height) const
+WebIDL::ExceptionOr<JS::GCPtr<ImageData>> CanvasRenderingContext2D::get_image_data(int x, int y, int width, int height, Optional<ImageDataSettings> const& settings) const
 {
     // 1. If either the sw or sh arguments are zero, then throw an "IndexSizeError" DOMException.
     if (width == 0 || height == 0)
@@ -331,7 +393,7 @@ WebIDL::ExceptionOr<JS::GCPtr<ImageData>> CanvasRenderingContext2D::get_image_da
 
     // 3. Let imageData be a new ImageData object.
     // 4. Initialize imageData given sw, sh, settings set to settings, and defaultColorSpace set to this's color space.
-    auto image_data = ImageData::create_with_size(realm(), width, height);
+    auto image_data = TRY(ImageData::create(realm(), width, height, settings));
 
     // NOTE: We don't attempt to create the underlying bitmap here; if it doesn't exist, it's like copying only transparent black pixels (which is a no-op).
     if (!canvas_element().bitmap())
@@ -453,7 +515,7 @@ CanvasRenderingContext2D::PreparedText CanvasRenderingContext2D::prepare_text(By
     for (auto c : text) {
         builder.append(Infra::is_ascii_whitespace(c) ? ' ' : c);
     }
-    auto replaced_text = builder.to_byte_string();
+    auto replaced_text = builder.string_view();
 
     // 3. Let font be the current font of target, as given by that object's font attribute.
     auto font = current_font();
@@ -531,7 +593,7 @@ void CanvasRenderingContext2D::clip_internal(Gfx::Path& path, Gfx::Painter::Wind
     if (drawing_state().clip.has_value()) {
         dbgln("FIXME: CRC2D: Calculate the new clip path by intersecting the given path with the current one.");
     }
-    drawing_state().clip = CanvasClip { path, winding_rule };
+    drawing_state().clip = Gfx::ClipPath { path, winding_rule };
 }
 
 void CanvasRenderingContext2D::clip(StringView fill_rule)
@@ -575,6 +637,14 @@ WebIDL::ExceptionOr<CanvasImageSourceUsability> check_usability_of_image(CanvasI
             if (canvas_element->width() == 0 || canvas_element->height() == 0)
                 return WebIDL::InvalidStateError::create(canvas_element->realm(), "Canvas width or height is zero"_fly_string);
             return Optional<CanvasImageSourceUsability> {};
+        },
+
+        // ImageBitmap
+        // FIXME: VideoFrame
+        [](JS::Handle<ImageBitmap> const& image_bitmap) -> WebIDL::ExceptionOr<Optional<CanvasImageSourceUsability>> {
+            if (image_bitmap->is_detached())
+                return WebIDL::InvalidStateError::create(image_bitmap->realm(), "Image bitmap is detached"_fly_string);
+            return Optional<CanvasImageSourceUsability> {};
         }));
     if (usability.has_value())
         return usability.release_value();
@@ -598,8 +668,7 @@ bool image_is_not_origin_clean(CanvasImageSource const& image)
         // image's media data is CORS-cross-origin.
 
         // HTMLCanvasElement
-        // FIXME: ImageBitmap
-        [](JS::Handle<HTMLCanvasElement> const&) {
+        [](OneOf<JS::Handle<HTMLCanvasElement>, JS::Handle<ImageBitmap>> auto const&) {
             // FIXME: image's bitmap's origin-clean flag is false.
             return false;
         });

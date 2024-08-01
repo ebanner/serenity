@@ -15,7 +15,6 @@
 #include <LibFileSystem/FileSystem.h>
 #include <LibJS/AST.h>
 #include <LibJS/Bytecode/Interpreter.h>
-#include <LibJS/JIT/NativeExecutable.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
@@ -54,10 +53,10 @@ ErrorOr<NonnullRefPtr<VM>> VM::create(OwnPtr<CustomData> custom_data)
     return vm;
 }
 
-template<u32... code_points>
+template<size_t... code_points>
 static constexpr auto make_single_ascii_character_strings(IndexSequence<code_points...>)
 {
-    return AK::Array { (String::from_code_point(code_points))... };
+    return AK::Array { (String::from_code_point(static_cast<u32>(code_points)))... };
 }
 
 static constexpr auto single_ascii_character_strings = make_single_ascii_character_strings(MakeIndexSequence<128>());
@@ -87,8 +86,8 @@ VM::VM(OwnPtr<CustomData> custom_data, ErrorMessages error_messages)
         enqueue_finalization_registry_cleanup_job(finalization_registry);
     };
 
-    host_enqueue_promise_job = [this](Function<ThrowCompletionOr<Value>()> job, Realm* realm) {
-        enqueue_promise_job(move(job), realm);
+    host_enqueue_promise_job = [this](NonnullGCPtr<HeapFunction<ThrowCompletionOr<Value>()>> job, Realm* realm) {
+        enqueue_promise_job(job, realm);
     };
 
     host_make_job_callback = [](FunctionObject& function_object) {
@@ -184,7 +183,7 @@ struct ExecutionContextRootsCollector : public Cell::Visitor {
         VERIFY_NOT_REACHED();
     }
 
-    HashTable<Cell*> roots;
+    HashTable<GCPtr<Cell>> roots;
 };
 
 void VM::gather_roots(HashMap<Cell*, HeapRoot>& roots)
@@ -208,320 +207,16 @@ void VM::gather_roots(HashMap<Cell*, HeapRoot>& roots)
         for (auto const& execution_context : stack) {
             ExecutionContextRootsCollector visitor;
             execution_context->visit_edges(visitor);
-            for (auto* cell : visitor.roots)
+            for (auto cell : visitor.roots)
                 roots.set(cell, HeapRoot { .type = HeapRoot::Type::VM });
         }
     };
     gather_roots_from_execution_context_stack(m_execution_context_stack);
     for (auto& saved_stack : m_saved_execution_context_stacks)
         gather_roots_from_execution_context_stack(saved_stack);
-}
 
-ThrowCompletionOr<Value> VM::named_evaluation_if_anonymous_function(ASTNode const& expression, DeprecatedFlyString const& name)
-{
-    // 8.3.3 Static Semantics: IsAnonymousFunctionDefinition ( expr ), https://tc39.es/ecma262/#sec-isanonymousfunctiondefinition
-    // And 8.3.5 Runtime Semantics: NamedEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-namedevaluation
-    if (is<FunctionExpression>(expression)) {
-        auto& function = static_cast<FunctionExpression const&>(expression);
-        if (!function.has_name()) {
-            return function.instantiate_ordinary_function_expression(*this, name);
-        }
-    } else if (is<ClassExpression>(expression)) {
-        auto& class_expression = static_cast<ClassExpression const&>(expression);
-        if (!class_expression.has_name()) {
-            return TRY(class_expression.class_definition_evaluation(*this, {}, name));
-        }
-    }
-
-    return execute_ast_node(expression);
-}
-
-// 8.5.2 Runtime Semantics: BindingInitialization, https://tc39.es/ecma262/#sec-runtime-semantics-bindinginitialization
-ThrowCompletionOr<void> VM::binding_initialization(DeprecatedFlyString const& target, Value value, Environment* environment)
-{
-    // 1. Let name be StringValue of Identifier.
-    // 2. Return ? InitializeBoundName(name, value, environment).
-    return initialize_bound_name(*this, target, value, environment);
-}
-
-// 8.5.2 Runtime Semantics: BindingInitialization, https://tc39.es/ecma262/#sec-runtime-semantics-bindinginitialization
-ThrowCompletionOr<void> VM::binding_initialization(NonnullRefPtr<BindingPattern const> const& target, Value value, Environment* environment)
-{
-    auto& vm = *this;
-
-    // BindingPattern : ObjectBindingPattern
-    if (target->kind == BindingPattern::Kind::Object) {
-        // 1. Perform ? RequireObjectCoercible(value).
-        TRY(require_object_coercible(vm, value));
-
-        // 2. Return ? BindingInitialization of ObjectBindingPattern with arguments value and environment.
-
-        // BindingInitialization of ObjectBindingPattern
-        // 1. Perform ? PropertyBindingInitialization of BindingPropertyList with arguments value and environment.
-        TRY(property_binding_initialization(*target, value, environment));
-
-        // 2. Return unused.
-        return {};
-    }
-    // BindingPattern : ArrayBindingPattern
-    else {
-        // 1. Let iteratorRecord be ? GetIterator(value, sync).
-        auto iterator_record = TRY(get_iterator(vm, value, IteratorHint::Sync));
-
-        // 2. Let result be Completion(IteratorBindingInitialization of ArrayBindingPattern with arguments iteratorRecord and environment).
-        auto result = iterator_binding_initialization(*target, iterator_record, environment);
-
-        // 3. If iteratorRecord.[[Done]] is false, return ? IteratorClose(iteratorRecord, result).
-        if (!iterator_record->done) {
-            // iterator_close() always returns a Completion, which ThrowCompletionOr will interpret as a throw
-            // completion. So only return the result of iterator_close() if it is indeed a throw completion.
-            auto completion = result.is_throw_completion() ? result.release_error() : normal_completion({});
-            if (completion = iterator_close(vm, iterator_record, move(completion)); completion.is_error())
-                return completion.release_error();
-        }
-
-        // 4. Return ? result.
-        return result;
-    }
-}
-
-ThrowCompletionOr<Value> VM::execute_ast_node(ASTNode const& node)
-{
-    auto executable = TRY(Bytecode::compile(*this, node, FunctionKind::Normal, ""sv));
-    auto result_or_error = bytecode_interpreter().run_and_return_frame(*executable, nullptr);
-    if (result_or_error.value.is_error())
-        return result_or_error.value.release_error();
-    return result_or_error.frame->registers()[0];
-}
-
-// 13.15.5.3 Runtime Semantics: PropertyDestructuringAssignmentEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-propertydestructuringassignmentevaluation
-// 14.3.3.1 Runtime Semantics: PropertyBindingInitialization, https://tc39.es/ecma262/#sec-destructuring-binding-patterns-runtime-semantics-propertybindinginitialization
-ThrowCompletionOr<void> VM::property_binding_initialization(BindingPattern const& binding, Value value, Environment* environment)
-{
-    auto& vm = *this;
-    auto& realm = *vm.current_realm();
-
-    auto object = TRY(value.to_object(vm));
-
-    HashTable<PropertyKey> seen_names;
-    for (auto& property : binding.entries) {
-
-        VERIFY(!property.is_elision());
-
-        if (property.is_rest) {
-            Reference assignment_target;
-            if (auto identifier_ptr = property.name.get_pointer<NonnullRefPtr<Identifier const>>()) {
-                assignment_target = TRY(resolve_binding((*identifier_ptr)->string(), environment));
-            } else {
-                VERIFY_NOT_REACHED();
-            }
-
-            auto rest_object = Object::create(realm, realm.intrinsics().object_prototype());
-            VERIFY(rest_object);
-
-            TRY(rest_object->copy_data_properties(vm, object, seen_names));
-            if (!environment)
-                return assignment_target.put_value(vm, rest_object);
-            else
-                return assignment_target.initialize_referenced_binding(vm, rest_object);
-        }
-
-        auto name = TRY(property.name.visit(
-            [&](Empty) -> ThrowCompletionOr<PropertyKey> { VERIFY_NOT_REACHED(); },
-            [&](NonnullRefPtr<Identifier const> const& identifier) -> ThrowCompletionOr<PropertyKey> {
-                return identifier->string();
-            },
-            [&](NonnullRefPtr<Expression const> const& expression) -> ThrowCompletionOr<PropertyKey> {
-                auto result = TRY(execute_ast_node(*expression));
-                return result.to_property_key(vm);
-            }));
-
-        seen_names.set(name);
-
-        if (property.name.has<NonnullRefPtr<Identifier const>>() && property.alias.has<Empty>()) {
-            // FIXME: this branch and not taking this have a lot in common we might want to unify it more (like it was before).
-            auto& identifier = *property.name.get<NonnullRefPtr<Identifier const>>();
-            auto reference = TRY(resolve_binding(identifier.string(), environment));
-
-            auto value_to_assign = TRY(object->get(name));
-            if (property.initializer && value_to_assign.is_undefined()) {
-                value_to_assign = TRY(named_evaluation_if_anonymous_function(*property.initializer, identifier.string()));
-            }
-
-            if (!environment)
-                TRY(reference.put_value(vm, value_to_assign));
-            else
-                TRY(reference.initialize_referenced_binding(vm, value_to_assign));
-            continue;
-        }
-
-        auto reference_to_assign_to = TRY(property.alias.visit(
-            [&](Empty) -> ThrowCompletionOr<Optional<Reference>> { return Optional<Reference> {}; },
-            [&](NonnullRefPtr<Identifier const> const& identifier) -> ThrowCompletionOr<Optional<Reference>> {
-                return TRY(resolve_binding(identifier->string(), environment));
-            },
-            [&](NonnullRefPtr<BindingPattern const> const&) -> ThrowCompletionOr<Optional<Reference>> { return Optional<Reference> {}; },
-            [&](NonnullRefPtr<MemberExpression const> const&) -> ThrowCompletionOr<Optional<Reference>> {
-                VERIFY_NOT_REACHED();
-            }));
-
-        auto value_to_assign = TRY(object->get(name));
-        if (property.initializer && value_to_assign.is_undefined()) {
-            if (auto* identifier_ptr = property.alias.get_pointer<NonnullRefPtr<Identifier const>>())
-                value_to_assign = TRY(named_evaluation_if_anonymous_function(*property.initializer, (*identifier_ptr)->string()));
-            else
-                value_to_assign = TRY(execute_ast_node(*property.initializer));
-        }
-
-        if (auto* binding_ptr = property.alias.get_pointer<NonnullRefPtr<BindingPattern const>>()) {
-            TRY(binding_initialization(*binding_ptr, value_to_assign, environment));
-        } else {
-            VERIFY(reference_to_assign_to.has_value());
-            if (!environment)
-                TRY(reference_to_assign_to->put_value(vm, value_to_assign));
-            else
-                TRY(reference_to_assign_to->initialize_referenced_binding(vm, value_to_assign));
-        }
-    }
-
-    return {};
-}
-
-// 13.15.5.5 Runtime Semantics: IteratorDestructuringAssignmentEvaluation, https://tc39.es/ecma262/#sec-runtime-semantics-iteratordestructuringassignmentevaluation
-// 8.5.3 Runtime Semantics: IteratorBindingInitialization, https://tc39.es/ecma262/#sec-runtime-semantics-iteratorbindinginitialization
-ThrowCompletionOr<void> VM::iterator_binding_initialization(BindingPattern const& binding, IteratorRecord& iterator_record, Environment* environment)
-{
-    auto& vm = *this;
-    auto& realm = *vm.current_realm();
-
-    // FIXME: this method is nearly identical to destructuring assignment!
-    for (size_t i = 0; i < binding.entries.size(); i++) {
-        auto& entry = binding.entries[i];
-        Value value;
-
-        auto assignment_target = TRY(entry.alias.visit(
-            [&](Empty) -> ThrowCompletionOr<Optional<Reference>> { return Optional<Reference> {}; },
-            [&](NonnullRefPtr<Identifier const> const& identifier) -> ThrowCompletionOr<Optional<Reference>> {
-                return TRY(resolve_binding(identifier->string(), environment));
-            },
-            [&](NonnullRefPtr<BindingPattern const> const&) -> ThrowCompletionOr<Optional<Reference>> { return Optional<Reference> {}; },
-            [&](NonnullRefPtr<MemberExpression const> const&) -> ThrowCompletionOr<Optional<Reference>> {
-                VERIFY_NOT_REACHED();
-            }));
-
-        // BindingRestElement : ... BindingIdentifier
-        // BindingRestElement : ... BindingPattern
-        if (entry.is_rest) {
-            VERIFY(i == binding.entries.size() - 1);
-
-            // 2. Let A be ! ArrayCreate(0).
-            auto array = MUST(Array::create(realm, 0));
-
-            // 3. Let n be 0.
-            // 4. Repeat,
-            while (true) {
-                ThrowCompletionOr<GCPtr<Object>> next { nullptr };
-
-                // a. If iteratorRecord.[[Done]] is false, then
-                if (!iterator_record.done) {
-                    // i. Let next be Completion(IteratorStep(iteratorRecord)).
-                    next = iterator_step(vm, iterator_record);
-
-                    // ii. If next is an abrupt completion, set iteratorRecord.[[Done]] to true.
-                    // iii. ReturnIfAbrupt(next).
-                    if (next.is_error()) {
-                        iterator_record.done = true;
-                        return next.release_error();
-                    }
-
-                    // iv. If next is false, set iteratorRecord.[[Done]] to true.
-                    if (!next.value())
-                        iterator_record.done = true;
-                }
-
-                // b. If iteratorRecord.[[Done]] is true, then
-                if (iterator_record.done) {
-                    // NOTE: Step i. and ii. are handled below.
-                    break;
-                }
-
-                // c. Let nextValue be Completion(IteratorValue(next)).
-                auto next_value = iterator_value(vm, *next.value());
-
-                // d. If nextValue is an abrupt completion, set iteratorRecord.[[Done]] to true.
-                // e. ReturnIfAbrupt(nextValue).
-                if (next_value.is_error()) {
-                    iterator_record.done = true;
-                    return next_value.release_error();
-                }
-
-                // f. Perform ! CreateDataPropertyOrThrow(A, ! ToString(𝔽(n)), nextValue).
-                array->indexed_properties().append(next_value.value());
-
-                // g. Set n to n + 1.
-            }
-            value = array;
-        }
-        // SingleNameBinding : BindingIdentifier Initializer[opt]
-        // BindingElement : BindingPattern Initializer[opt]
-        else {
-            // 1. Let v be undefined.
-            value = js_undefined();
-
-            // 2. If iteratorRecord.[[Done]] is false, then
-            if (!iterator_record.done) {
-                // a. Let next be Completion(IteratorStep(iteratorRecord)).
-                auto next = iterator_step(vm, iterator_record);
-
-                // b. If next is an abrupt completion, set iteratorRecord.[[Done]] to true.
-                // c. ReturnIfAbrupt(next).
-                if (next.is_error()) {
-                    iterator_record.done = true;
-                    return next.release_error();
-                }
-
-                // d. If next is false, set iteratorRecord.[[Done]] to true.
-                if (!next.value()) {
-                    iterator_record.done = true;
-                }
-                // e. Else,
-                else {
-                    // i. Set v to Completion(IteratorValue(next)).
-                    auto value_or_error = iterator_value(vm, *next.value());
-
-                    // ii. If v is an abrupt completion, set iteratorRecord.[[Done]] to true.
-                    // iii. ReturnIfAbrupt(v).
-                    if (value_or_error.is_throw_completion()) {
-                        iterator_record.done = true;
-                        return value_or_error.release_error();
-                    }
-                    value = value_or_error.release_value();
-                }
-            }
-
-            // NOTE: Step 3. and 4. are handled below.
-        }
-
-        if (value.is_undefined() && entry.initializer) {
-            VERIFY(!entry.is_rest);
-            if (auto* identifier_ptr = entry.alias.get_pointer<NonnullRefPtr<Identifier const>>())
-                value = TRY(named_evaluation_if_anonymous_function(*entry.initializer, (*identifier_ptr)->string()));
-            else
-                value = TRY(execute_ast_node(*entry.initializer));
-        }
-
-        if (auto* binding_ptr = entry.alias.get_pointer<NonnullRefPtr<BindingPattern const>>()) {
-            TRY(binding_initialization(*binding_ptr, value, environment));
-        } else if (!entry.alias.has<Empty>()) {
-            VERIFY(assignment_target.has_value());
-            if (!environment)
-                TRY(assignment_target->put_value(vm, value));
-            else
-                TRY(assignment_target->initialize_referenced_binding(vm, value));
-        }
-    }
-
-    return {};
+    for (auto& job : m_promise_jobs)
+        roots.set(job, HeapRoot { .type = HeapRoot::Type::VM });
 }
 
 // 9.1.2.1 GetIdentifierReference ( env, name, strict ), https://tc39.es/ecma262/#sec-getidentifierreference
@@ -675,19 +370,19 @@ void VM::run_queued_promise_jobs()
         auto job = m_promise_jobs.take_first();
         dbgln_if(PROMISE_DEBUG, "Calling promise job function");
 
-        [[maybe_unused]] auto result = job();
+        [[maybe_unused]] auto result = job->function()();
     }
 }
 
 // 9.5.4 HostEnqueuePromiseJob ( job, realm ), https://tc39.es/ecma262/#sec-hostenqueuepromisejob
-void VM::enqueue_promise_job(Function<ThrowCompletionOr<Value>()> job, Realm*)
+void VM::enqueue_promise_job(NonnullGCPtr<HeapFunction<ThrowCompletionOr<Value>()>> job, Realm*)
 {
     // An implementation of HostEnqueuePromiseJob must conform to the requirements in 9.5 as well as the following:
     // - FIXME: If realm is not null, each time job is invoked the implementation must perform implementation-defined steps such that execution is prepared to evaluate ECMAScript code at the time of job's invocation.
     // - FIXME: Let scriptOrModule be GetActiveScriptOrModule() at the time HostEnqueuePromiseJob is invoked. If realm is not null, each time job is invoked the implementation must perform implementation-defined steps
     //          such that scriptOrModule is the active script or module at the time of job's invocation.
     // - Jobs must run in the same order as the HostEnqueuePromiseJob invocations that scheduled them.
-    m_promise_jobs.append(move(job));
+    m_promise_jobs.append(job);
 }
 
 void VM::run_queued_finalization_registry_cleanup_jobs()
@@ -728,8 +423,8 @@ void VM::dump_backtrace() const
 {
     for (ssize_t i = m_execution_context_stack.size() - 1; i >= 0; --i) {
         auto& frame = m_execution_context_stack[i];
-        if (frame->instruction_stream_iterator.has_value() && frame->instruction_stream_iterator->source_code()) {
-            auto source_range = frame->instruction_stream_iterator->source_range().realize();
+        if (frame->executable && frame->program_counter.has_value()) {
+            auto source_range = frame->executable->source_range_at(frame->program_counter.value()).realize();
             dbgln("-> {} @ {}:{},{}", frame->function_name ? frame->function_name->utf8_string() : ""_string, source_range.filename(), source_range.start.line, source_range.start.column);
         } else {
             dbgln("-> {}", frame->function_name ? frame->function_name->utf8_string() : ""_string);
@@ -994,7 +689,7 @@ void VM::load_imported_module(ImportedModuleReferrer referrer, ModuleRequest con
 void VM::push_execution_context(ExecutionContext& context)
 {
     if (!m_execution_context_stack.is_empty())
-        m_execution_context_stack.last()->instruction_stream_iterator = bytecode_interpreter().instruction_stream_iterator();
+        m_execution_context_stack.last()->program_counter = bytecode_interpreter().program_counter();
     m_execution_context_stack.append(&context);
 }
 
@@ -1012,53 +707,26 @@ struct [[gnu::packed]] NativeStackFrame {
 };
 #endif
 
-Vector<FlatPtr> VM::get_native_stack_trace() const
-{
-    Vector<FlatPtr> buffer;
-#if ARCH(X86_64)
-    // Manually walk the stack, because backtrace() does not traverse through JIT frames.
-    auto* frame = bit_cast<NativeStackFrame*>(__builtin_frame_address(0));
-    while (bit_cast<FlatPtr>(frame) < m_stack_info.top() && bit_cast<FlatPtr>(frame) >= m_stack_info.base()) {
-        buffer.append(frame->return_address);
-        frame = frame->prev;
-    }
-#endif
-    return buffer;
-}
-
-static Optional<UnrealizedSourceRange> get_source_range(ExecutionContext const* context, Vector<FlatPtr> const& native_stack)
+static Optional<UnrealizedSourceRange> get_source_range(ExecutionContext const* context)
 {
     // native function
     if (!context->executable)
         return {};
 
-    auto const* native_executable = context->executable->native_executable();
-    if (!native_executable) {
-        // Interpreter frame
-        if (context->instruction_stream_iterator.has_value())
-            return context->instruction_stream_iterator->source_range();
+    if (!context->program_counter.has_value())
         return {};
-    }
 
-    // JIT frame
-    for (auto address : native_stack) {
-        auto range = native_executable->get_source_range(*context->executable, address);
-        if (range.has_value())
-            return range;
-    }
-
-    return {};
+    return context->executable->source_range_at(context->program_counter.value());
 }
 
 Vector<StackTraceElement> VM::stack_trace() const
 {
-    auto native_stack = get_native_stack_trace();
     Vector<StackTraceElement> stack_trace;
     for (ssize_t i = m_execution_context_stack.size() - 1; i >= 0; i--) {
         auto* context = m_execution_context_stack[i];
         stack_trace.append({
             .execution_context = context,
-            .source_range = get_source_range(context, native_stack).value_or({}),
+            .source_range = get_source_range(context).value_or({}),
         });
     }
 

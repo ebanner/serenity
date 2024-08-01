@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2021-2022, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021-2022, Kenneth Myhra <kennethmyhra@serenityos.org>
- * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021-2024, Sam Atkins <atkinssj@serenityos.org>
  * Copyright (c) 2022, Matthias Zimmerman <matthias291999@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -15,6 +15,7 @@
 #include <AK/String.h>
 #include <AK/Vector.h>
 #include <Kernel/API/BeepInstruction.h>
+#include <LibCore/Environment.h>
 #include <LibCore/SessionManagement.h>
 #include <LibCore/System.h>
 #include <limits.h>
@@ -46,8 +47,7 @@ static int memfd_create(char const* name, unsigned int flags)
 }
 #endif
 
-#if defined(AK_OS_MACOS)
-#    include <crt_externs.h>
+#if defined(AK_OS_MACOS) || defined(AK_OS_IOS)
 #    include <mach-o/dyld.h>
 #    include <sys/mman.h>
 #else
@@ -140,7 +140,7 @@ static ErrorOr<Optional<struct group>> getgrent_impl(Span<char> buffer)
 namespace Core::System {
 
 #ifndef HOST_NAME_MAX
-#    ifdef AK_OS_MACOS
+#    if defined(AK_OS_MACOS) || defined(AK_OS_IOS)
 #        define HOST_NAME_MAX 255
 #    else
 #        define HOST_NAME_MAX 64
@@ -374,7 +374,7 @@ ErrorOr<void> profiling_free_buffer(pid_t pid)
 }
 #endif
 
-#if !defined(AK_OS_BSD_GENERIC) && !defined(AK_OS_ANDROID)
+#if !defined(AK_OS_BSD_GENERIC)
 ErrorOr<Optional<struct spwd>> getspent()
 {
     errno = 0;
@@ -399,7 +399,7 @@ ErrorOr<Optional<struct spwd>> getspnam(StringView name)
 }
 #endif
 
-#if !defined(AK_OS_MACOS) && !defined(AK_OS_HAIKU)
+#if !defined(AK_OS_MACOS) && !defined(AK_OS_IOS) && !defined(AK_OS_HAIKU)
 ErrorOr<int> accept4(int sockfd, sockaddr* address, socklen_t* address_length, int flags)
 {
     auto fd = ::accept4(sockfd, address, address_length, flags);
@@ -595,6 +595,13 @@ ErrorOr<void> ftruncate(int fd, off_t length)
 {
     if (::ftruncate(fd, length) < 0)
         return Error::from_syscall("ftruncate"sv, -errno);
+    return {};
+}
+
+ErrorOr<void> fsync(int fd)
+{
+    if (::fsync(fd) < 0)
+        return Error::from_syscall("fsync"sv, -errno);
     return {};
 }
 
@@ -898,17 +905,19 @@ ErrorOr<Optional<struct group>> getgrnam(StringView name)
         return Optional<struct group> {};
 }
 
+#if !defined(AK_OS_IOS)
 ErrorOr<void> clock_settime(clockid_t clock_id, struct timespec* ts)
 {
-#ifdef AK_OS_SERENITY
+#    ifdef AK_OS_SERENITY
     int rc = syscall(SC_clock_settime, clock_id, ts);
     HANDLE_SYSCALL_RETURN_VALUE("clocksettime", rc, {});
-#else
+#    else
     if (::clock_settime(clock_id, ts) < 0)
         return Error::from_syscall("clocksettime"sv, -errno);
     return {};
-#endif
+#    endif
 }
+#endif
 
 static ALWAYS_INLINE ErrorOr<pid_t> posix_spawn_wrapper(StringView path, posix_spawn_file_actions_t const* file_actions, posix_spawnattr_t const* attr, char* const arguments[], char* const envp[], StringView function_name, decltype(::posix_spawn) spawn_function)
 {
@@ -1255,7 +1264,7 @@ ErrorOr<struct utsname> uname()
     return uts;
 }
 
-#if !defined(AK_OS_ANDROID) && !defined(AK_OS_HAIKU)
+#if !defined(AK_OS_HAIKU)
 ErrorOr<void> adjtime(const struct timeval* delta, struct timeval* old_delta)
 {
 #    ifdef AK_OS_SERENITY
@@ -1273,18 +1282,12 @@ ErrorOr<void> adjtime(const struct timeval* delta, struct timeval* old_delta)
 ErrorOr<void> exec_command(Vector<StringView>& command, bool preserve_env)
 {
     Vector<StringView> exec_environment;
-    for (size_t i = 0; environ[i]; ++i) {
-        StringView env_view { environ[i], strlen(environ[i]) };
-        auto maybe_needle = env_view.find('=');
-
-        if (!maybe_needle.has_value())
-            continue;
-
+    for (auto entry : Environment::entries()) {
         // FIXME: Allow a custom selection of variables once ArgsParser supports options with optional parameters.
-        if (!preserve_env && env_view.substring_view(0, maybe_needle.value()) != "TERM"sv)
+        if (!preserve_env && entry.name != "TERM"sv)
             continue;
 
-        exec_environment.append(env_view);
+        exec_environment.append(entry.full_entry);
     }
 
     TRY(Core::System::exec(command.at(0), command, Core::System::SearchInPath::Yes, exec_environment));
@@ -1322,8 +1325,7 @@ ErrorOr<void> exec(StringView filename, ReadonlySpan<StringView> arguments, Sear
     if (environment.has_value()) {
         env_count = environment->size();
     } else {
-        for (size_t i = 0; environ[i]; ++i)
-            ++env_count;
+        env_count = Core::Environment::size();
     }
 
     auto environment_strings = TRY(FixedArray<Syscall::StringArgument>::create(env_count));
@@ -1332,8 +1334,9 @@ ErrorOr<void> exec(StringView filename, ReadonlySpan<StringView> arguments, Sear
             environment_strings[i] = { environment->at(i).characters_without_null_termination(), environment->at(i).length() };
         }
     } else {
-        for (size_t i = 0; i < env_count; ++i) {
-            environment_strings[i] = { environ[i], strlen(environ[i]) };
+        size_t i = 0;
+        for (auto entry : Core::Environment::entries()) {
+            environment_strings[i++] = { entry.full_entry.characters_without_null_termination(), entry.full_entry.length() };
         }
     }
     params.environment.strings = environment_strings.data();
@@ -1385,7 +1388,7 @@ ErrorOr<void> exec(StringView filename, ReadonlySpan<StringView> arguments, Sear
         envp[environment->size()] = nullptr;
 
         if (search_in_path == SearchInPath::Yes && !filename.contains('/')) {
-#    if defined(AK_OS_MACOS) || defined(AK_OS_FREEBSD) || defined(AK_OS_SOLARIS)
+#    if defined(AK_OS_MACOS) || defined(AK_OS_IOS) || defined(AK_OS_FREEBSD) || defined(AK_OS_SOLARIS)
             // These BSDs don't support execvpe(), so we'll have to manually search the PATH.
             ScopedValueRollback errno_rollback(errno);
 
@@ -1567,16 +1570,35 @@ ErrorOr<void> socketpair(int domain, int type, int protocol, int sv[2])
     return {};
 }
 
-ErrorOr<Array<int, 2>> pipe2([[maybe_unused]] int flags)
+ErrorOr<Array<int, 2>> pipe2(int flags)
 {
     Array<int, 2> fds;
+
 #if defined(__unix__)
     if (::pipe2(fds.data(), flags) < 0)
         return Error::from_syscall("pipe2"sv, -errno);
 #else
     if (::pipe(fds.data()) < 0)
         return Error::from_syscall("pipe2"sv, -errno);
+
+    // Ensure we don't leak the fds if any of the system calls below fail.
+    AK::ArmedScopeGuard close_fds { [&]() {
+        MUST(close(fds[0]));
+        MUST(close(fds[1]));
+    } };
+
+    if ((flags & O_CLOEXEC) != 0) {
+        TRY(fcntl(fds[0], F_SETFD, FD_CLOEXEC));
+        TRY(fcntl(fds[1], F_SETFD, FD_CLOEXEC));
+    }
+    if ((flags & O_NONBLOCK) != 0) {
+        TRY(fcntl(fds[0], F_SETFL, TRY(fcntl(fds[0], F_GETFL)) | O_NONBLOCK));
+        TRY(fcntl(fds[1], F_SETFL, TRY(fcntl(fds[1], F_GETFL)) | O_NONBLOCK));
+    }
+
+    close_fds.disarm();
 #endif
+
     return fds;
 }
 
@@ -1607,7 +1629,7 @@ ErrorOr<void> mknod(StringView pathname, mode_t mode, dev_t dev)
         return Error::from_syscall("mknod"sv, -EFAULT);
 
 #ifdef AK_OS_SERENITY
-    Syscall::SC_mknod_params params { { pathname.characters_without_null_termination(), pathname.length() }, mode, dev };
+    Syscall::SC_mknod_params params { { pathname.characters_without_null_termination(), pathname.length() }, mode, dev, AT_FDCWD };
     int rc = syscall(SC_mknod, &params);
     HANDLE_SYSCALL_RETURN_VALUE("mknod", rc, {});
 #else
@@ -1621,49 +1643,6 @@ ErrorOr<void> mknod(StringView pathname, mode_t mode, dev_t dev)
 ErrorOr<void> mkfifo(StringView pathname, mode_t mode)
 {
     return mknod(pathname, mode | S_IFIFO, 0);
-}
-
-ErrorOr<void> setenv(StringView name, StringView value, bool overwrite)
-{
-    auto builder = TRY(StringBuilder::create());
-    TRY(builder.try_append(name));
-    TRY(builder.try_append('\0'));
-    TRY(builder.try_append(value));
-    TRY(builder.try_append('\0'));
-    // Note the explicit null terminators above.
-    auto c_name = builder.string_view().characters_without_null_termination();
-    auto c_value = c_name + name.length() + 1;
-    auto rc = ::setenv(c_name, c_value, overwrite);
-    if (rc < 0)
-        return Error::from_errno(errno);
-    return {};
-}
-
-ErrorOr<void> unsetenv(StringView name)
-{
-    auto builder = TRY(StringBuilder::create());
-    TRY(builder.try_append(name));
-    TRY(builder.try_append('\0'));
-
-    // Note the explicit null terminator above.
-    auto rc = ::unsetenv(builder.string_view().characters_without_null_termination());
-    if (rc < 0)
-        return Error::from_errno(errno);
-    return {};
-}
-
-ErrorOr<void> putenv(StringView env)
-{
-#ifdef AK_OS_SERENITY
-    auto rc = serenity_putenv(env.characters_without_null_termination(), env.length());
-#else
-    // Leak somewhat unavoidable here due to the putenv API.
-    auto leaked_new_env = strndup(env.characters_without_null_termination(), env.length());
-    auto rc = ::putenv(leaked_new_env);
-#endif
-    if (rc < 0)
-        return Error::from_errno(errno);
-    return {};
 }
 
 ErrorOr<int> posix_openpt(int flags)
@@ -1767,6 +1746,11 @@ ErrorOr<void> posix_fallocate(int fd, off_t offset, off_t length)
 // the distinction between these libraries moot.
 static constexpr StringView INTERNAL_DEFAULT_PATH_SV = "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin"sv;
 
+unsigned hardware_concurrency()
+{
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
+
 ErrorOr<String> resolve_executable_from_environment(StringView filename, int flags)
 {
     if (filename.is_empty())
@@ -1797,19 +1781,10 @@ ErrorOr<String> resolve_executable_from_environment(StringView filename, int fla
     return Error::from_errno(ENOENT);
 }
 
-char** environment()
-{
-#if defined(AK_OS_MACOS)
-    return *_NSGetEnviron();
-#else
-    return environ;
-#endif
-}
-
 ErrorOr<ByteString> current_executable_path()
 {
     char path[4096] = {};
-#if defined(AK_OS_LINUX) || defined(AK_OS_ANDROID) || defined(AK_OS_SERENITY)
+#if defined(AK_OS_LINUX) || defined(AK_OS_SERENITY)
     auto ret = ::readlink("/proc/self/exe", path, sizeof(path) - 1);
     // Ignore error if it wasn't a symlink
     if (ret == -1 && errno != EINVAL)
@@ -1840,7 +1815,7 @@ ErrorOr<ByteString> current_executable_path()
     size_t len = sizeof(path);
     if (sysctl(mib, 4, path, &len, nullptr, 0) < 0)
         return Error::from_syscall("sysctl"sv, -errno);
-#elif defined(AK_OS_MACOS)
+#elif defined(AK_OS_MACOS) || defined(AK_OS_IOS)
     u32 size = sizeof(path);
     auto ret = _NSGetExecutablePath(path, &size);
     if (ret != 0)

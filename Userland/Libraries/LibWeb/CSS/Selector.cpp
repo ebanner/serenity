@@ -23,6 +23,53 @@ Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
             }
         }
     }
+
+    collect_ancestor_hashes();
+}
+
+void Selector::collect_ancestor_hashes()
+{
+    size_t next_hash_index = 0;
+    auto append_unique_hash = [&](u32 hash) -> bool {
+        if (next_hash_index >= m_ancestor_hashes.size())
+            return true;
+        for (size_t i = 0; i < next_hash_index; ++i) {
+            if (m_ancestor_hashes[i] == hash)
+                return false;
+        }
+        m_ancestor_hashes[next_hash_index++] = hash;
+        return false;
+    };
+
+    auto last_combinator = m_compound_selectors.last().combinator;
+    for (ssize_t compound_selector_index = static_cast<ssize_t>(m_compound_selectors.size()) - 2; compound_selector_index >= 0; --compound_selector_index) {
+        auto const& compound_selector = m_compound_selectors[compound_selector_index];
+        if (last_combinator == Combinator::Descendant) {
+            for (auto const& simple_selector : compound_selector.simple_selectors) {
+                switch (simple_selector.type) {
+                case SimpleSelector::Type::Id:
+                case SimpleSelector::Type::Class:
+                    if (append_unique_hash(simple_selector.name().hash()))
+                        return;
+                    break;
+                case SimpleSelector::Type::TagName:
+                    if (append_unique_hash(simple_selector.qualified_name().name.name.hash()))
+                        return;
+                    break;
+                case SimpleSelector::Type::Attribute:
+                    if (append_unique_hash(simple_selector.attribute().qualified_name.name.name.hash()))
+                        return;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+        last_combinator = compound_selector.combinator;
+    }
+
+    for (size_t i = next_hash_index; i < m_ancestor_hashes.size(); ++i)
+        m_ancestor_hashes[i] = 0;
 }
 
 // https://www.w3.org/TR/selectors-4/#specificity-rules
@@ -394,6 +441,8 @@ StringView Selector::PseudoElement::name(Selector::PseudoElement::Type pseudo_el
         return "-webkit-slider-runnable-track"sv;
     case Selector::PseudoElement::Type::SliderThumb:
         return "-webkit-slider-thumb"sv;
+    case Selector::PseudoElement::Type::Backdrop:
+        return "backdrop"sv;
     case Selector::PseudoElement::Type::KnownPseudoElementCount:
         break;
     case Selector::PseudoElement::Type::UnknownWebKit:
@@ -430,6 +479,8 @@ Optional<Selector::PseudoElement> Selector::PseudoElement::from_string(FlyString
         return Selector::PseudoElement { Selector::PseudoElement::Type::Placeholder };
     } else if (name.equals_ignoring_ascii_case("selection"sv)) {
         return Selector::PseudoElement { Selector::PseudoElement::Type::Selection };
+    } else if (name.equals_ignoring_ascii_case("backdrop"sv)) {
+        return Selector::PseudoElement { Selector::PseudoElement::Type::Backdrop };
     } else if (name.equals_ignoring_ascii_case("-webkit-slider-runnable-track"sv)) {
         return Selector::PseudoElement { Selector::PseudoElement::Type::SliderRunnableTrack };
     } else if (name.equals_ignoring_ascii_case("-webkit-slider-thumb"sv)) {

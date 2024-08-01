@@ -104,7 +104,7 @@ ErrorOr<void> PropertiesWindow::create_widgets(bool disable_rename)
         m_directory_statistics_calculator->on_update = [this, origin_event_loop = &Core::EventLoop::current()](off_t total_size_in_bytes, size_t file_count, size_t directory_count) {
             origin_event_loop->deferred_invoke([=, weak_this = make_weak_ptr<PropertiesWindow>()] {
                 if (auto strong_this = weak_this.strong_ref())
-                    strong_this->m_size_label->set_text(String::formatted("{}\n{} files, {} subdirectories", human_readable_size_long(total_size_in_bytes, UseThousandsSeparator::Yes), file_count, directory_count).release_value_but_fixme_should_propagate_errors());
+                    strong_this->m_size_label->set_text(MUST(String::formatted("{}\n{} files, {} subdirectories", human_readable_size_long(total_size_in_bytes, UseThousandsSeparator::Yes), file_count, directory_count)));
             });
         };
         m_directory_statistics_calculator->start();
@@ -186,7 +186,7 @@ ErrorOr<void> PropertiesWindow::create_general_tab(GUI::TabWidget& tab_widget, b
     m_size_label = general_tab.find_descendant_of_type_named<GUI::Label>("size");
     m_size_label->set_text(S_ISDIR(st.st_mode)
             ? "Calculating..."_string
-            : TRY(String::from_byte_string(human_readable_size_long(st.st_size, UseThousandsSeparator::Yes))));
+            : human_readable_size_long(st.st_size, UseThousandsSeparator::Yes));
 
     auto* owner = general_tab.find_descendant_of_type_named<GUI::Label>("owner");
     owner->set_text(String::formatted("{} ({})", owner_name, st.st_uid).release_value_but_fixme_should_propagate_errors());
@@ -195,10 +195,10 @@ ErrorOr<void> PropertiesWindow::create_general_tab(GUI::TabWidget& tab_widget, b
     group->set_text(String::formatted("{} ({})", group_name, st.st_gid).release_value_but_fixme_should_propagate_errors());
 
     auto* created_at = general_tab.find_descendant_of_type_named<GUI::Label>("created_at");
-    created_at->set_text(String::from_byte_string(GUI::FileSystemModel::timestamp_string(st.st_ctime)).release_value_but_fixme_should_propagate_errors());
+    created_at->set_text(MUST(String::from_byte_string(GUI::FileSystemModel::timestamp_string(st.st_ctime))));
 
     auto* last_modified = general_tab.find_descendant_of_type_named<GUI::Label>("last_modified");
-    last_modified->set_text(String::from_byte_string(GUI::FileSystemModel::timestamp_string(st.st_mtime)).release_value_but_fixme_should_propagate_errors());
+    last_modified->set_text(MUST(String::from_byte_string(GUI::FileSystemModel::timestamp_string(st.st_mtime))));
 
     auto* owner_read = general_tab.find_descendant_of_type_named<GUI::CheckBox>("owner_read");
     auto* owner_write = general_tab.find_descendant_of_type_named<GUI::CheckBox>("owner_write");
@@ -266,7 +266,7 @@ ErrorOr<void> PropertiesWindow::create_archive_tab(GUI::TabWidget& tab_widget, N
     tab.find_descendant_of_type_named<GUI::Label>("archive_file_count")->set_text(TRY(String::number(statistics.file_count())));
     tab.find_descendant_of_type_named<GUI::Label>("archive_format")->set_text("ZIP"_string);
     tab.find_descendant_of_type_named<GUI::Label>("archive_directory_count")->set_text(TRY(String::number(statistics.directory_count())));
-    tab.find_descendant_of_type_named<GUI::Label>("archive_uncompressed_size")->set_text(TRY(String::from_byte_string(AK::human_readable_size(statistics.total_uncompressed_bytes()))));
+    tab.find_descendant_of_type_named<GUI::Label>("archive_uncompressed_size")->set_text(human_readable_size(statistics.total_uncompressed_bytes()));
 
     return {};
 }
@@ -285,7 +285,7 @@ ErrorOr<void> PropertiesWindow::create_audio_tab(GUI::TabWidget& tab_widget, Non
 
     tab.find_descendant_of_type_named<GUI::Label>("audio_type")->set_text(TRY(String::from_byte_string(loader->format_name())));
     auto duration_seconds = loader->total_samples() / loader->sample_rate();
-    tab.find_descendant_of_type_named<GUI::Label>("audio_duration")->set_text(TRY(String::from_byte_string(human_readable_digital_time(duration_seconds))));
+    tab.find_descendant_of_type_named<GUI::Label>("audio_duration")->set_text(human_readable_digital_time(duration_seconds));
     tab.find_descendant_of_type_named<GUI::Label>("audio_sample_rate")->set_text(TRY(String::formatted("{} Hz", loader->sample_rate())));
     tab.find_descendant_of_type_named<GUI::Label>("audio_format")->set_text(TRY(String::formatted("{}-bit", loader->bits_per_sample())));
 
@@ -403,7 +403,7 @@ ErrorOr<void> PropertiesWindow::create_font_tab(GUI::TabWidget& tab_widget, Nonn
 
 ErrorOr<void> PropertiesWindow::create_image_tab(GUI::TabWidget& tab_widget, NonnullOwnPtr<Core::MappedFile> mapped_file, StringView mime_type)
 {
-    auto image_decoder = Gfx::ImageDecoder::try_create_for_raw_bytes(mapped_file->bytes(), mime_type);
+    auto image_decoder = TRY(Gfx::ImageDecoder::try_create_for_raw_bytes(mapped_file->bytes(), mime_type));
     if (!image_decoder)
         return {};
 

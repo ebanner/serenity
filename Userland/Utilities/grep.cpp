@@ -10,7 +10,6 @@
 #include <AK/LexicalPath.h>
 #include <AK/ScopeGuard.h>
 #include <AK/StringBuilder.h>
-#include <AK/URL.h>
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/DirIterator.h>
@@ -19,6 +18,7 @@
 #include <LibFileSystem/FileSystem.h>
 #include <LibMain/Main.h>
 #include <LibRegex/Regex.h>
+#include <LibURL/URL.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -204,7 +204,7 @@ ErrorOr<int> serenity_main(Main::Arguments args)
             return true;
         },
     });
-    args_parser.add_option(disable_hyperlinks, "Disable hyperlinks", "no-hyperlinks", 0);
+    args_parser.add_option(disable_hyperlinks, "Disable hyperlinks", "no-hyperlinks");
     args_parser.add_option(count_lines, "Output line count instead of line contents", "count", 'c');
     args_parser.add_positional_argument(files, "File(s) to process", "file", Core::ArgsParser::Required::No);
     args_parser.parse(args);

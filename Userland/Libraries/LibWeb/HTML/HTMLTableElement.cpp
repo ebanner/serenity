@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLTableElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleProperties.h>
@@ -34,7 +35,7 @@ HTMLTableElement::~HTMLTableElement() = default;
 void HTMLTableElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLTableElementPrototype>(realm, "HTMLTableElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLTableElement);
 }
 
 void HTMLTableElement::visit_edges(Cell::Visitor& visitor)
@@ -382,7 +383,7 @@ JS::NonnullGCPtr<DOM::HTMLCollection> HTMLTableElement::rows()
 }
 
 // https://html.spec.whatwg.org/multipage/tables.html#dom-table-insertrow
-WebIDL::ExceptionOr<JS::NonnullGCPtr<HTMLTableRowElement>> HTMLTableElement::insert_row(long index)
+WebIDL::ExceptionOr<JS::NonnullGCPtr<HTMLTableRowElement>> HTMLTableElement::insert_row(WebIDL::Long index)
 {
     auto rows = this->rows();
     auto rows_length = rows->length();
@@ -408,7 +409,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<HTMLTableRowElement>> HTMLTableElement::ins
 }
 
 // https://html.spec.whatwg.org/multipage/tables.html#dom-table-deleterow
-WebIDL::ExceptionOr<void> HTMLTableElement::delete_row(long index)
+WebIDL::ExceptionOr<void> HTMLTableElement::delete_row(WebIDL::Long index)
 {
     auto rows = this->rows();
     auto rows_length = rows->length();

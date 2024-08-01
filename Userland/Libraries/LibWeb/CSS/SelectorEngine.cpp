@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2022, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2024, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -9,8 +9,10 @@
 #include <LibWeb/CSS/SelectorEngine.h>
 #include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/CSS/ValueID.h>
+#include <LibWeb/DOM/Attr.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/DOM/NamedNodeMap.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
@@ -28,6 +30,7 @@
 #include <LibWeb/HTML/HTMLSelectElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Namespace.h>
 
 namespace Web::SelectorEngine {
 
@@ -131,10 +134,16 @@ static inline bool matches_attribute(CSS::Selector::SimpleSelector::Attribute co
 
     auto const& attribute_name = attribute.qualified_name.name.name;
 
+    auto const* attr = element.namespace_uri() == Namespace::HTML ? element.attributes()->get_attribute_with_lowercase_qualified_name(attribute_name)
+                                                                  : element.attributes()->get_attribute(attribute_name);
+
     if (attribute.match_type == CSS::Selector::SimpleSelector::Attribute::MatchType::HasAttribute) {
         // Early way out in case of an attribute existence selector.
-        return element.has_attribute(attribute_name);
+        return attr != nullptr;
     }
+
+    if (!attr)
+        return false;
 
     auto const case_insensitive_match = (attribute.case_type == CSS::Selector::SimpleSelector::Attribute::CaseType::CaseInsensitiveMatch);
     auto const case_sensitivity = case_insensitive_match
@@ -144,14 +153,14 @@ static inline bool matches_attribute(CSS::Selector::SimpleSelector::Attribute co
     switch (attribute.match_type) {
     case CSS::Selector::SimpleSelector::Attribute::MatchType::ExactValueMatch:
         return case_insensitive_match
-            ? Infra::is_ascii_case_insensitive_match(element.attribute(attribute_name).value_or({}), attribute.value)
-            : element.attribute(attribute_name) == attribute.value;
+            ? Infra::is_ascii_case_insensitive_match(attr->value(), attribute.value)
+            : attr->value() == attribute.value;
     case CSS::Selector::SimpleSelector::Attribute::MatchType::ContainsWord: {
         if (attribute.value.is_empty()) {
             // This selector is always false is match value is empty.
             return false;
         }
-        auto attribute_value = element.attribute(attribute_name).value_or({});
+        auto const& attribute_value = attr->value();
         auto const view = attribute_value.bytes_as_string_view().split_view(' ');
         auto const size = view.size();
         for (size_t i = 0; i < size; ++i) {
@@ -166,9 +175,9 @@ static inline bool matches_attribute(CSS::Selector::SimpleSelector::Attribute co
     }
     case CSS::Selector::SimpleSelector::Attribute::MatchType::ContainsString:
         return !attribute.value.is_empty()
-            && element.attribute(attribute_name).value_or({}).contains(attribute.value, case_sensitivity);
+            && attr->value().contains(attribute.value, case_sensitivity);
     case CSS::Selector::SimpleSelector::Attribute::MatchType::StartsWithSegment: {
-        auto const element_attr_value = element.attribute(attribute_name).value_or({});
+        auto const& element_attr_value = attr->value();
         if (element_attr_value.is_empty()) {
             // If the attribute value on element is empty, the selector is true
             // if the match value is also empty and false otherwise.
@@ -184,10 +193,10 @@ static inline bool matches_attribute(CSS::Selector::SimpleSelector::Attribute co
     }
     case CSS::Selector::SimpleSelector::Attribute::MatchType::StartsWithString:
         return !attribute.value.is_empty()
-            && element.attribute(attribute_name).value_or({}).bytes_as_string_view().starts_with(attribute.value, case_sensitivity);
+            && attr->value().bytes_as_string_view().starts_with(attribute.value, case_sensitivity);
     case CSS::Selector::SimpleSelector::Attribute::MatchType::EndsWithString:
         return !attribute.value.is_empty()
-            && element.attribute(attribute_name).value_or({}).bytes_as_string_view().ends_with(attribute.value, case_sensitivity);
+            && attr->value().bytes_as_string_view().ends_with(attribute.value, case_sensitivity);
     default:
         break;
     }
@@ -276,10 +285,10 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
         if (!matches_link_pseudo_class(element))
             return false;
         auto document_url = element.document().url();
-        AK::URL target_url = element.document().parse_url(element.attribute(HTML::AttributeNames::href).value_or({}));
+        URL::URL target_url = element.document().parse_url(element.attribute(HTML::AttributeNames::href).value_or({}));
         if (target_url.fragment().has_value())
-            return document_url.equals(target_url, AK::URL::ExcludeFragment::No);
-        return document_url.equals(target_url, AK::URL::ExcludeFragment::Yes);
+            return document_url.equals(target_url, URL::ExcludeFragment::No);
+        return document_url.equals(target_url, URL::ExcludeFragment::Yes);
     }
     case CSS::PseudoClass::Visited:
         // FIXME: Maybe match this selector sometimes?
@@ -538,6 +547,38 @@ static inline bool matches_pseudo_class(CSS::Selector::SimpleSelector::PseudoCla
     return false;
 }
 
+static ALWAYS_INLINE bool matches_namespace(
+    CSS::Selector::SimpleSelector::QualifiedName const& qualified_name,
+    DOM::Element const& element,
+    Optional<CSS::CSSStyleSheet const&> style_sheet_for_rule)
+{
+    switch (qualified_name.namespace_type) {
+    case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Default:
+        // "if no default namespace has been declared for selectors, this is equivalent to *|E."
+        if (!style_sheet_for_rule.has_value() || !style_sheet_for_rule->default_namespace_rule())
+            return true;
+        // "Otherwise it is equivalent to ns|E where ns is the default namespace."
+        return element.namespace_uri() == style_sheet_for_rule->default_namespace_rule()->namespace_uri();
+    case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::None:
+        // "elements with name E without a namespace"
+        return !element.namespace_uri().has_value();
+    case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Any:
+        // "elements with name E in any namespace, including those without a namespace"
+        return true;
+    case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Named:
+        // "elements with name E in namespace ns"
+        // Unrecognized namespace prefixes are invalid, so don't match.
+        // (We can't detect this at parse time, since a namespace rule may be inserted later.)
+        // So, if we don't have a context to look up namespaces from, we fail to match.
+        if (!style_sheet_for_rule.has_value())
+            return false;
+
+        auto selector_namespace = style_sheet_for_rule->namespace_uri(qualified_name.namespace_);
+        return selector_namespace.has_value() && selector_namespace.value() == element.namespace_uri();
+    }
+    VERIFY_NOT_REACHED();
+}
+
 static inline bool matches(CSS::Selector::SimpleSelector const& component, Optional<CSS::CSSStyleSheet const&> style_sheet_for_rule, DOM::Element const& element, JS::GCPtr<DOM::ParentNode const> scope)
 {
     switch (component.type) {
@@ -556,32 +597,7 @@ static inline bool matches(CSS::Selector::SimpleSelector const& component, Optio
             }
         }
 
-        // Match the namespace
-        switch (qualified_name.namespace_type) {
-        case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Default:
-            // "if no default namespace has been declared for selectors, this is equivalent to *|E."
-            if (!style_sheet_for_rule.has_value() || !style_sheet_for_rule->default_namespace().has_value())
-                return true;
-            // "Otherwise it is equivalent to ns|E where ns is the default namespace."
-            return element.namespace_uri() == style_sheet_for_rule->default_namespace();
-        case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::None:
-            // "elements with name E without a namespace"
-            return !element.namespace_uri().has_value();
-        case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Any:
-            // "elements with name E in any namespace, including those without a namespace"
-            return true;
-        case CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Named:
-            // "elements with name E in namespace ns"
-            // Unrecognized namespace prefixes are invalid, so don't match.
-            // (We can't detect this at parse time, since a namespace rule may be inserted later.)
-            // So, if we don't have a context to look up namespaces from, we fail to match.
-            if (!style_sheet_for_rule.has_value())
-                return false;
-
-            auto selector_namespace = style_sheet_for_rule->namespace_uri(qualified_name.namespace_);
-            return selector_namespace.has_value() && selector_namespace.value() == element.namespace_uri();
-        }
-        VERIFY_NOT_REACHED();
+        return matches_namespace(qualified_name, element, style_sheet_for_rule);
     }
     case CSS::Selector::SimpleSelector::Type::Id:
         return component.name() == element.id();
@@ -649,6 +665,140 @@ bool matches(CSS::Selector const& selector, Optional<CSS::CSSStyleSheet const&> 
     if (!pseudo_element.has_value() && selector.pseudo_element().has_value())
         return false;
     return matches(selector, style_sheet_for_rule, selector.compound_selectors().size() - 1, element, scope);
+}
+
+static bool fast_matches_simple_selector(CSS::Selector::SimpleSelector const& simple_selector, Optional<CSS::CSSStyleSheet const&> style_sheet_for_rule, DOM::Element const& element)
+{
+    switch (simple_selector.type) {
+    case CSS::Selector::SimpleSelector::Type::Universal:
+        return matches_namespace(simple_selector.qualified_name(), element, style_sheet_for_rule);
+    case CSS::Selector::SimpleSelector::Type::TagName:
+        if (element.document().document_type() == DOM::Document::Type::HTML) {
+            if (simple_selector.qualified_name().name.lowercase_name != element.local_name())
+                return false;
+        } else if (!Infra::is_ascii_case_insensitive_match(simple_selector.qualified_name().name.name, element.local_name())) {
+            return false;
+        }
+        return matches_namespace(simple_selector.qualified_name(), element, style_sheet_for_rule);
+    case CSS::Selector::SimpleSelector::Type::Class:
+        return element.has_class(simple_selector.name());
+    case CSS::Selector::SimpleSelector::Type::Id:
+        return simple_selector.name() == element.id();
+    case CSS::Selector::SimpleSelector::Type::Attribute:
+        return matches_attribute(simple_selector.attribute(), style_sheet_for_rule, element);
+    case CSS::Selector::SimpleSelector::Type::PseudoClass:
+        return matches_pseudo_class(simple_selector.pseudo_class(), style_sheet_for_rule, element, nullptr);
+    default:
+        VERIFY_NOT_REACHED();
+    }
+}
+
+static bool fast_matches_compound_selector(CSS::Selector::CompoundSelector const& compound_selector, Optional<CSS::CSSStyleSheet const&> style_sheet_for_rule, DOM::Element const& element)
+{
+    for (auto const& simple_selector : compound_selector.simple_selectors) {
+        if (!fast_matches_simple_selector(simple_selector, style_sheet_for_rule, element))
+            return false;
+    }
+    return true;
+}
+
+bool fast_matches(CSS::Selector const& selector, Optional<CSS::CSSStyleSheet const&> style_sheet_for_rule, DOM::Element const& element_to_match)
+{
+    DOM::Element const* current = &element_to_match;
+
+    ssize_t compound_selector_index = selector.compound_selectors().size() - 1;
+
+    if (!fast_matches_compound_selector(selector.compound_selectors().last(), style_sheet_for_rule, *current))
+        return false;
+
+    // NOTE: If we fail after following a child combinator, we may need to backtrack
+    //       to the last matched descendant. We store the state here.
+    struct {
+        JS::GCPtr<DOM::Element const> element;
+        ssize_t compound_selector_index = 0;
+    } backtrack_state;
+
+    for (;;) {
+        // NOTE: There should always be a leftmost compound selector without combinator that kicks us out of this loop.
+        VERIFY(compound_selector_index >= 0);
+
+        auto const* compound_selector = &selector.compound_selectors()[compound_selector_index];
+
+        switch (compound_selector->combinator) {
+        case CSS::Selector::Combinator::None:
+            return true;
+        case CSS::Selector::Combinator::Descendant:
+            backtrack_state = { current->parent_element(), compound_selector_index };
+            compound_selector = &selector.compound_selectors()[--compound_selector_index];
+            for (current = current->parent_element(); current; current = current->parent_element()) {
+                if (fast_matches_compound_selector(*compound_selector, style_sheet_for_rule, *current))
+                    break;
+            }
+            if (!current)
+                return false;
+            break;
+        case CSS::Selector::Combinator::ImmediateChild:
+            compound_selector = &selector.compound_selectors()[--compound_selector_index];
+            current = current->parent_element();
+            if (!current)
+                return false;
+            if (!fast_matches_compound_selector(*compound_selector, style_sheet_for_rule, *current)) {
+                if (backtrack_state.element) {
+                    current = backtrack_state.element;
+                    compound_selector_index = backtrack_state.compound_selector_index;
+                    continue;
+                }
+                return false;
+            }
+            break;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+}
+
+bool can_use_fast_matches(CSS::Selector const& selector)
+{
+    for (auto const& compound_selector : selector.compound_selectors()) {
+        if (compound_selector.combinator != CSS::Selector::Combinator::None
+            && compound_selector.combinator != CSS::Selector::Combinator::Descendant
+            && compound_selector.combinator != CSS::Selector::Combinator::ImmediateChild) {
+            return false;
+        }
+
+        for (auto const& simple_selector : compound_selector.simple_selectors) {
+            if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoClass) {
+                auto const pseudo_class = simple_selector.pseudo_class().type;
+                if (pseudo_class != CSS::PseudoClass::FirstChild
+                    && pseudo_class != CSS::PseudoClass::LastChild
+                    && pseudo_class != CSS::PseudoClass::OnlyChild
+                    && pseudo_class != CSS::PseudoClass::Hover
+                    && pseudo_class != CSS::PseudoClass::Active
+                    && pseudo_class != CSS::PseudoClass::Focus
+                    && pseudo_class != CSS::PseudoClass::FocusVisible
+                    && pseudo_class != CSS::PseudoClass::FocusWithin
+                    && pseudo_class != CSS::PseudoClass::Link
+                    && pseudo_class != CSS::PseudoClass::AnyLink
+                    && pseudo_class != CSS::PseudoClass::Visited
+                    && pseudo_class != CSS::PseudoClass::LocalLink
+                    && pseudo_class != CSS::PseudoClass::Empty
+                    && pseudo_class != CSS::PseudoClass::Root
+                    && pseudo_class != CSS::PseudoClass::Enabled
+                    && pseudo_class != CSS::PseudoClass::Disabled
+                    && pseudo_class != CSS::PseudoClass::Checked) {
+                    return false;
+                }
+            } else if (simple_selector.type != CSS::Selector::SimpleSelector::Type::TagName
+                && simple_selector.type != CSS::Selector::SimpleSelector::Type::Universal
+                && simple_selector.type != CSS::Selector::SimpleSelector::Type::Class
+                && simple_selector.type != CSS::Selector::SimpleSelector::Type::Id
+                && simple_selector.type != CSS::Selector::SimpleSelector::Type::Attribute) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 }

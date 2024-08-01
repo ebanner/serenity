@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2021-2024, Tim Flynn <trflynn89@serenityos.org>
  * Copyright (c) 2022, the SerenityOS developers.
  * Copyright (c) 2022, Tobias Christiansen <tobyase@serenityos.org>
  * Copyright (c) 2023, Jelle Raaijmakers <jelle@gmta.nl>
@@ -9,13 +9,11 @@
 
 #include <AK/IPv4Address.h>
 #include <AK/StringBuilder.h>
-#include <AK/StringView.h>
 #include <AK/Time.h>
-#include <AK/URL.h>
 #include <AK/Vector.h>
-#include <LibCore/Promise.h>
 #include <LibSQL/TupleDescriptor.h>
 #include <LibSQL/Value.h>
+#include <LibURL/URL.h>
 #include <LibWeb/Cookie/ParsedCookie.h>
 #include <LibWebView/CookieJar.h>
 #include <LibWebView/Database.h>
@@ -23,7 +21,9 @@
 
 namespace WebView {
 
-ErrorOr<CookieJar> CookieJar::create(Database& database)
+static constexpr auto DATABASE_SYNCHRONIZATION_TIMER = Duration::from_seconds(30);
+
+ErrorOr<NonnullOwnPtr<CookieJar>> CookieJar::create(Database& database)
 {
     Statements statements {};
 
@@ -58,32 +58,55 @@ ErrorOr<CookieJar> CookieJar::create(Database& database)
 
     statements.insert_cookie = TRY(database.prepare_statement("INSERT INTO Cookies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"sv));
     statements.expire_cookie = TRY(database.prepare_statement("DELETE FROM Cookies WHERE (expiry_time < ?);"sv));
-    statements.select_cookie = TRY(database.prepare_statement("SELECT * FROM Cookies WHERE ((name = ?) AND (domain = ?) AND (path = ?));"sv));
     statements.select_all_cookies = TRY(database.prepare_statement("SELECT * FROM Cookies;"sv));
 
-    return CookieJar { PersistedStorage { database, move(statements) } };
+    return adopt_own(*new CookieJar { PersistedStorage { database, statements } });
 }
 
-CookieJar CookieJar::create()
+NonnullOwnPtr<CookieJar> CookieJar::create()
 {
-    return CookieJar { TransientStorage {} };
+    return adopt_own(*new CookieJar { OptionalNone {} });
 }
 
-CookieJar::CookieJar(PersistedStorage storage)
-    : m_storage(move(storage))
+CookieJar::CookieJar(Optional<PersistedStorage> persisted_storage)
+    : m_persisted_storage(move(persisted_storage))
 {
-    auto& persisted_storage = m_storage.get<PersistedStorage>();
-    persisted_storage.database.execute_statement(persisted_storage.statements.create_table, {}, {}, {});
+    if (!m_persisted_storage.has_value())
+        return;
+
+    m_persisted_storage->database.execute_statement(m_persisted_storage->statements.create_table, {}, {}, {});
+
+    // FIXME: Make cookie retrieval lazy so we don't need to retrieve all cookies up front.
+    auto cookies = m_persisted_storage->select_all_cookies();
+    m_transient_storage.set_cookies(move(cookies));
+
+    m_persisted_storage->synchronization_timer = Core::Timer::create_repeating(
+        static_cast<int>(DATABASE_SYNCHRONIZATION_TIMER.to_milliseconds()),
+        [this]() {
+            auto now = m_transient_storage.purge_expired_cookies();
+            m_persisted_storage->database.execute_statement(m_persisted_storage->statements.expire_cookie, {}, {}, {}, now);
+
+            // FIXME: Implement "INSERT OR REPLACE"
+            for (auto const& it : m_transient_storage.take_inserted_cookies())
+                m_persisted_storage->insert_cookie(it.value);
+            for (auto const& it : m_transient_storage.take_updated_cookies())
+                m_persisted_storage->update_cookie(it.value);
+        });
+    m_persisted_storage->synchronization_timer->start();
 }
 
-CookieJar::CookieJar(TransientStorage storage)
-    : m_storage(move(storage))
+CookieJar::~CookieJar()
 {
+    if (!m_persisted_storage.has_value())
+        return;
+
+    m_persisted_storage->synchronization_timer->stop();
+    m_persisted_storage->synchronization_timer->on_timeout();
 }
 
-ByteString CookieJar::get_cookie(const URL& url, Web::Cookie::Source source)
+String CookieJar::get_cookie(const URL::URL& url, Web::Cookie::Source source)
 {
-    purge_expired_cookies();
+    m_transient_storage.purge_expired_cookies();
 
     auto domain = canonicalize_domain(url);
     if (!domain.has_value())
@@ -101,52 +124,47 @@ ByteString CookieJar::get_cookie(const URL& url, Web::Cookie::Source source)
         builder.appendff("{}={}", cookie.name, cookie.value);
     }
 
-    return builder.to_byte_string();
+    return MUST(builder.to_string());
 }
 
-void CookieJar::set_cookie(const URL& url, Web::Cookie::ParsedCookie const& parsed_cookie, Web::Cookie::Source source)
+void CookieJar::set_cookie(const URL::URL& url, Web::Cookie::ParsedCookie const& parsed_cookie, Web::Cookie::Source source)
 {
     auto domain = canonicalize_domain(url);
     if (!domain.has_value())
         return;
 
-    store_cookie(parsed_cookie, url, move(domain.value()), source);
+    store_cookie(parsed_cookie, url, domain.release_value(), source);
 }
 
 // This is based on https://www.rfc-editor.org/rfc/rfc6265#section-5.3 as store_cookie() below
 // however the whole ParsedCookie->Cookie conversion is skipped.
 void CookieJar::update_cookie(Web::Cookie::Cookie cookie)
 {
-    select_cookie_from_database(
-        move(cookie),
+    CookieStorageKey key { cookie.name, cookie.domain, cookie.path };
 
-        // 11. If the cookie store contains a cookie with the same name, domain, and path as the newly created cookie:
-        [this](auto& cookie, auto old_cookie) {
-            // Update the creation-time of the newly created cookie to match the creation-time of the old-cookie.
-            cookie.creation_time = old_cookie.creation_time;
+    // 11. If the cookie store contains a cookie with the same name, domain, and path as the newly created cookie:
+    if (auto old_cookie = m_transient_storage.get_cookie(key); old_cookie.has_value()) {
+        // Update the creation-time of the newly created cookie to match the creation-time of the old-cookie.
+        cookie.creation_time = old_cookie->creation_time;
 
-            // Remove the old-cookie from the cookie store.
-            // NOTE: Rather than deleting then re-inserting this cookie, we update it in-place.
-            update_cookie_in_database(cookie);
-        },
+        // Remove the old-cookie from the cookie store.
+        // NOTE: Rather than deleting then re-inserting this cookie, we update it in-place.
+    }
 
-        // 12. Insert the newly created cookie into the cookie store.
-        [this](auto cookie) {
-            insert_cookie_into_database(cookie);
-        });
+    // 12. Insert the newly created cookie into the cookie store.
+    m_transient_storage.set_cookie(move(key), move(cookie));
+
+    m_transient_storage.purge_expired_cookies();
 }
 
 void CookieJar::dump_cookies()
 {
-    static constexpr auto key_color = "\033[34;1m"sv;
-    static constexpr auto attribute_color = "\033[33m"sv;
-    static constexpr auto no_color = "\033[0m"sv;
-
     StringBuilder builder;
-    size_t total_cookies { 0 };
 
-    select_all_cookies_from_database([&](auto cookie) {
-        ++total_cookies;
+    m_transient_storage.for_each_cookie([&](auto const& cookie) {
+        static constexpr auto key_color = "\033[34;1m"sv;
+        static constexpr auto attribute_color = "\033[33m"sv;
+        static constexpr auto no_color = "\033[0m"sv;
 
         builder.appendff("{}{}{} - ", key_color, cookie.name, no_color);
         builder.appendff("{}{}{} - ", key_color, cookie.domain, no_color);
@@ -163,22 +181,23 @@ void CookieJar::dump_cookies()
         builder.appendff("\t{}SameSite{} = {:s}\n", attribute_color, no_color, Web::Cookie::same_site_to_string(cookie.same_site));
     });
 
-    dbgln("{} cookies stored\n{}", total_cookies, builder.to_byte_string());
+    dbgln("{} cookies stored\n{}", m_transient_storage.size(), builder.string_view());
 }
 
 Vector<Web::Cookie::Cookie> CookieJar::get_all_cookies()
 {
     Vector<Web::Cookie::Cookie> cookies;
+    cookies.ensure_capacity(m_transient_storage.size());
 
-    select_all_cookies_from_database([&](auto cookie) {
-        cookies.append(move(cookie));
+    m_transient_storage.for_each_cookie([&](auto const& cookie) {
+        cookies.unchecked_append(cookie);
     });
 
     return cookies;
 }
 
 // https://w3c.github.io/webdriver/#dfn-associated-cookies
-Vector<Web::Cookie::Cookie> CookieJar::get_all_cookies(URL const& url)
+Vector<Web::Cookie::Cookie> CookieJar::get_all_cookies(URL::URL const& url)
 {
     auto domain = canonicalize_domain(url);
     if (!domain.has_value())
@@ -187,7 +206,7 @@ Vector<Web::Cookie::Cookie> CookieJar::get_all_cookies(URL const& url)
     return get_matching_cookies(url, domain.value(), Web::Cookie::Source::Http, MatchingCookiesSpecMode::WebDriver);
 }
 
-Optional<Web::Cookie::Cookie> CookieJar::get_named_cookie(URL const& url, ByteString const& name)
+Optional<Web::Cookie::Cookie> CookieJar::get_named_cookie(URL::URL const& url, StringView name)
 {
     auto domain = canonicalize_domain(url);
     if (!domain.has_value())
@@ -196,14 +215,14 @@ Optional<Web::Cookie::Cookie> CookieJar::get_named_cookie(URL const& url, ByteSt
     auto cookie_list = get_matching_cookies(url, domain.value(), Web::Cookie::Source::Http, MatchingCookiesSpecMode::WebDriver);
 
     for (auto const& cookie : cookie_list) {
-        if (cookie.name == name.view())
+        if (cookie.name == name)
             return cookie;
     }
 
     return {};
 }
 
-Optional<ByteString> CookieJar::canonicalize_domain(const URL& url)
+Optional<String> CookieJar::canonicalize_domain(const URL::URL& url)
 {
     // https://tools.ietf.org/html/rfc6265#section-5.1.2
     if (!url.is_valid())
@@ -213,10 +232,10 @@ Optional<ByteString> CookieJar::canonicalize_domain(const URL& url)
     if (url.host().has<Empty>())
         return {};
 
-    return url.serialized_host().release_value_but_fixme_should_propagate_errors().to_byte_string().to_lowercase();
+    return MUST(MUST(url.serialized_host()).to_lowercase());
 }
 
-bool CookieJar::domain_matches(ByteString const& string, ByteString const& domain_string)
+bool CookieJar::domain_matches(StringView string, StringView domain_string)
 {
     // https://tools.ietf.org/html/rfc6265#section-5.1.3
 
@@ -240,7 +259,7 @@ bool CookieJar::domain_matches(ByteString const& string, ByteString const& domai
     return true;
 }
 
-bool CookieJar::path_matches(ByteString const& request_path, ByteString const& cookie_path)
+bool CookieJar::path_matches(StringView request_path, StringView cookie_path)
 {
     // https://tools.ietf.org/html/rfc6265#section-5.1.4
 
@@ -263,29 +282,29 @@ bool CookieJar::path_matches(ByteString const& request_path, ByteString const& c
     return false;
 }
 
-ByteString CookieJar::default_path(const URL& url)
+String CookieJar::default_path(const URL::URL& url)
 {
     // https://tools.ietf.org/html/rfc6265#section-5.1.4
 
     // 1. Let uri-path be the path portion of the request-uri if such a portion exists (and empty otherwise).
-    ByteString uri_path = url.serialize_path();
+    auto uri_path = url.serialize_path();
 
     // 2. If the uri-path is empty or if the first character of the uri-path is not a %x2F ("/") character, output %x2F ("/") and skip the remaining steps.
     if (uri_path.is_empty() || (uri_path[0] != '/'))
-        return "/";
+        return "/"_string;
 
     StringView uri_path_view = uri_path;
     size_t last_separator = uri_path_view.find_last('/').value();
 
     // 3. If the uri-path contains no more than one %x2F ("/") character, output %x2F ("/") and skip the remaining step.
     if (last_separator == 0)
-        return "/";
+        return "/"_string;
 
     // 4. Output the characters of the uri-path from the first character up to, but not including, the right-most %x2F ("/").
-    return uri_path.substring(0, last_separator);
+    return MUST(String::from_utf8(uri_path.substring_view(0, last_separator)));
 }
 
-void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, const URL& url, ByteString canonicalized_domain, Web::Cookie::Source source)
+void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, const URL::URL& url, String canonicalized_domain, Web::Cookie::Source source)
 {
     // https://tools.ietf.org/html/rfc6265#section-5.3
 
@@ -307,7 +326,7 @@ void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, con
     } else {
         // Set the cookie's persistent-flag to false. Set the cookie's expiry-time to the latest representable date.
         cookie.persistent = false;
-        cookie.expiry_time = UnixDateTime::latest();
+        cookie.expiry_time = UnixDateTime::from_unix_time_parts(3000, 1, 1, 0, 0, 0, 0);
     }
 
     // 4. If the cookie-attribute-list contains an attribute with an attribute-name of "Domain":
@@ -319,7 +338,7 @@ void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, con
     // 5. If the user agent is configured to reject "public suffixes" and the domain-attribute is a public suffix:
     if (is_public_suffix(cookie.domain)) {
         // If the domain-attribute is identical to the canonicalized request-host:
-        if (cookie.domain == canonicalized_domain.view()) {
+        if (cookie.domain == canonicalized_domain) {
             // Let the domain-attribute be the empty string.
             cookie.domain = String {};
         }
@@ -333,7 +352,7 @@ void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, con
     // 6. If the domain-attribute is non-empty:
     if (!cookie.domain.is_empty()) {
         // If the canonicalized request-host does not domain-match the domain-attribute: Ignore the cookie entirely and abort these steps.
-        if (!domain_matches(canonicalized_domain, cookie.domain.to_byte_string()))
+        if (!domain_matches(canonicalized_domain, cookie.domain))
             return;
 
         // Set the cookie's host-only-flag to false. Set the cookie's domain to the domain-attribute.
@@ -341,7 +360,7 @@ void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, con
     } else {
         // Set the cookie's host-only-flag to true. Set the cookie's domain to the canonicalized request-host.
         cookie.host_only = true;
-        cookie.domain = MUST(String::from_byte_string(canonicalized_domain));
+        cookie.domain = move(canonicalized_domain);
     }
 
     // 7. If the cookie-attribute-list contains an attribute with an attribute-name of "Path":
@@ -349,7 +368,7 @@ void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, con
         // Set the cookie's path to attribute-value of the last attribute in the cookie-attribute-list with an attribute-name of "Path".
         cookie.path = parsed_cookie.path.value();
     } else {
-        cookie.path = MUST(String::from_byte_string(default_path(url)));
+        cookie.path = default_path(url);
     }
 
     // 8. If the cookie-attribute-list contains an attribute with an attribute-name of "Secure", set the cookie's secure-only-flag to true.
@@ -362,54 +381,46 @@ void CookieJar::store_cookie(Web::Cookie::ParsedCookie const& parsed_cookie, con
     if (source != Web::Cookie::Source::Http && cookie.http_only)
         return;
 
-    // Synchronize persisting the cookie
-    auto sync_promise = Core::Promise<Empty>::construct();
+    CookieStorageKey key { cookie.name, cookie.domain, cookie.path };
 
-    select_cookie_from_database(
-        move(cookie),
+    // 11. If the cookie store contains a cookie with the same name, domain, and path as the newly created cookie:
+    if (auto const& old_cookie = m_transient_storage.get_cookie(key); old_cookie.has_value()) {
+        // If the newly created cookie was received from a "non-HTTP" API and the old-cookie's http-only-flag is set, abort these
+        // steps and ignore the newly created cookie entirely.
+        if (source != Web::Cookie::Source::Http && old_cookie->http_only)
+            return;
 
-        // 11. If the cookie store contains a cookie with the same name, domain, and path as the newly created cookie:
-        [this, source, sync_promise](auto& cookie, auto old_cookie) {
-            // If the newly created cookie was received from a "non-HTTP" API and the old-cookie's http-only-flag is set, abort these
-            // steps and ignore the newly created cookie entirely.
-            if (source != Web::Cookie::Source::Http && old_cookie.http_only)
-                return;
+        // Update the creation-time of the newly created cookie to match the creation-time of the old-cookie.
+        cookie.creation_time = old_cookie->creation_time;
 
-            // Update the creation-time of the newly created cookie to match the creation-time of the old-cookie.
-            cookie.creation_time = old_cookie.creation_time;
+        // Remove the old-cookie from the cookie store.
+        // NOTE: Rather than deleting then re-inserting this cookie, we update it in-place.
+    }
 
-            // Remove the old-cookie from the cookie store.
-            // NOTE: Rather than deleting then re-inserting this cookie, we update it in-place.
-            update_cookie_in_database(cookie);
-            sync_promise->resolve({});
-        },
+    // 12. Insert the newly created cookie into the cookie store.
+    m_transient_storage.set_cookie(move(key), move(cookie));
 
-        // 12. Insert the newly created cookie into the cookie store.
-        [this, sync_promise](auto cookie) {
-            insert_cookie_into_database(cookie);
-            sync_promise->resolve({});
-        });
-
-    MUST(sync_promise->await());
+    m_transient_storage.purge_expired_cookies();
 }
 
-Vector<Web::Cookie::Cookie> CookieJar::get_matching_cookies(const URL& url, ByteString const& canonicalized_domain, Web::Cookie::Source source, MatchingCookiesSpecMode mode)
+Vector<Web::Cookie::Cookie> CookieJar::get_matching_cookies(const URL::URL& url, StringView canonicalized_domain, Web::Cookie::Source source, MatchingCookiesSpecMode mode)
 {
     // https://tools.ietf.org/html/rfc6265#section-5.4
+    auto now = UnixDateTime::now();
 
     // 1. Let cookie-list be the set of cookies from the cookie store that meets all of the following requirements:
     Vector<Web::Cookie::Cookie> cookie_list;
 
-    select_all_cookies_from_database([&](auto cookie) {
+    m_transient_storage.for_each_cookie([&](auto& cookie) {
         // Either: The cookie's host-only-flag is true and the canonicalized request-host is identical to the cookie's domain.
         // Or: The cookie's host-only-flag is false and the canonicalized request-host domain-matches the cookie's domain.
-        bool is_host_only_and_has_identical_domain = cookie.host_only && (canonicalized_domain.view() == cookie.domain);
-        bool is_not_host_only_and_domain_matches = !cookie.host_only && domain_matches(canonicalized_domain, cookie.domain.to_byte_string());
+        bool is_host_only_and_has_identical_domain = cookie.host_only && (canonicalized_domain == cookie.domain);
+        bool is_not_host_only_and_domain_matches = !cookie.host_only && domain_matches(canonicalized_domain, cookie.domain);
         if (!is_host_only_and_has_identical_domain && !is_not_host_only_and_domain_matches)
             return;
 
         // The request-uri's path path-matches the cookie's path.
-        if (!path_matches(url.serialize_path(), cookie.path.to_byte_string()))
+        if (!path_matches(url.serialize_path(), cookie.path))
             return;
 
         // If the cookie's secure-only-flag is true, then the request-uri's scheme must denote a "secure" protocol.
@@ -422,9 +433,13 @@ Vector<Web::Cookie::Cookie> CookieJar::get_matching_cookies(const URL& url, Byte
 
         // NOTE: The WebDriver spec expects only step 1 above to be executed to match cookies.
         if (mode == MatchingCookiesSpecMode::WebDriver) {
-            cookie_list.append(move(cookie));
+            cookie_list.append(cookie);
             return;
         }
+
+        // 3. Update the last-access-time of each cookie in the cookie-list to the current date and time.
+        // NOTE: We do this first so that both our internal storage and cookie-list are updated.
+        cookie.last_access_time = now;
 
         // 2.  The user agent SHOULD sort the cookie-list in the following order:
         //   - Cookies with longer paths are listed before cookies with shorter paths.
@@ -432,10 +447,11 @@ Vector<Web::Cookie::Cookie> CookieJar::get_matching_cookies(const URL& url, Byte
         auto cookie_path_length = cookie.path.bytes().size();
         auto cookie_creation_time = cookie.creation_time;
 
-        cookie_list.insert_before_matching(move(cookie), [cookie_path_length, cookie_creation_time](auto const& entry) {
+        cookie_list.insert_before_matching(cookie, [cookie_path_length, cookie_creation_time](auto const& entry) {
             if (cookie_path_length > entry.path.bytes().size()) {
                 return true;
-            } else if (cookie_path_length == entry.path.bytes().size()) {
+            }
+            if (cookie_path_length == entry.path.bytes().size()) {
                 if (cookie_creation_time < entry.creation_time)
                     return true;
             }
@@ -443,13 +459,8 @@ Vector<Web::Cookie::Cookie> CookieJar::get_matching_cookies(const URL& url, Byte
         });
     });
 
-    // 3. Update the last-access-time of each cookie in the cookie-list to the current date and time.
-    auto now = UnixDateTime::now();
-
-    for (auto& cookie : cookie_list) {
-        cookie.last_access_time = now;
-        update_cookie_in_database(cookie);
-    }
+    if (mode != MatchingCookiesSpecMode::WebDriver)
+        m_transient_storage.purge_expired_cookies();
 
     return cookie_list;
 }
@@ -466,7 +477,7 @@ static ErrorOr<Web::Cookie::Cookie> parse_cookie(ReadonlySpan<SQL::Value> row)
         if (value.type() != SQL::SQLType::Text)
             return Error::from_string_view(name);
 
-        field = MUST(String::from_byte_string(value.to_byte_string()));
+        field = MUST(value.to_string());
         return {};
     };
 
@@ -518,143 +529,110 @@ static ErrorOr<Web::Cookie::Cookie> parse_cookie(ReadonlySpan<SQL::Value> row)
     return cookie;
 }
 
-void CookieJar::insert_cookie_into_database(Web::Cookie::Cookie const& cookie)
+void CookieJar::TransientStorage::set_cookies(Cookies cookies)
 {
-    m_storage.visit(
-        [&](PersistedStorage& storage) {
-            storage.database.execute_statement(
-                storage.statements.insert_cookie, {}, [this]() { purge_expired_cookies(); }, {},
-                cookie.name.to_byte_string(),
-                cookie.value.to_byte_string(),
-                to_underlying(cookie.same_site),
-                cookie.creation_time,
-                cookie.last_access_time,
-                cookie.expiry_time,
-                cookie.domain.to_byte_string(),
-                cookie.path.to_byte_string(),
-                cookie.secure,
-                cookie.http_only,
-                cookie.host_only,
-                cookie.persistent);
-        },
-        [&](TransientStorage& storage) {
-            CookieStorageKey key { cookie.name.to_byte_string(), cookie.domain.to_byte_string(), cookie.path.to_byte_string() };
-            storage.set(key, cookie);
-        });
+    m_cookies = move(cookies);
+    purge_expired_cookies();
 }
 
-void CookieJar::update_cookie_in_database(Web::Cookie::Cookie const& cookie)
+void CookieJar::TransientStorage::set_cookie(CookieStorageKey key, Web::Cookie::Cookie cookie)
 {
-    m_storage.visit(
-        [&](PersistedStorage& storage) {
-            storage.database.execute_statement(
-                storage.statements.update_cookie, {}, [this]() { purge_expired_cookies(); }, {},
-                cookie.value.to_byte_string(),
-                to_underlying(cookie.same_site),
-                cookie.creation_time,
-                cookie.last_access_time,
-                cookie.expiry_time,
-                cookie.secure,
-                cookie.http_only,
-                cookie.host_only,
-                cookie.persistent,
-                cookie.name.to_byte_string(),
-                cookie.domain.to_byte_string(),
-                cookie.path.to_byte_string());
-        },
-        [&](TransientStorage& storage) {
-            CookieStorageKey key { cookie.name.to_byte_string(), cookie.domain.to_byte_string(), cookie.path.to_byte_string() };
-            storage.set(key, cookie);
-        });
-}
+    auto result = m_cookies.set(key, cookie);
 
-struct WrappedCookie : public RefCounted<WrappedCookie> {
-    explicit WrappedCookie(Web::Cookie::Cookie cookie_)
-        : RefCounted()
-        , cookie(move(cookie_))
-    {
+    switch (result) {
+    case HashSetResult::InsertedNewEntry:
+        m_inserted_cookies.set(move(key), move(cookie));
+        break;
+
+    case HashSetResult::ReplacedExistingEntry:
+        if (m_inserted_cookies.contains(key))
+            m_inserted_cookies.set(move(key), move(cookie));
+        else
+            m_updated_cookies.set(move(key), move(cookie));
+        break;
+
+    case HashSetResult::KeptExistingEntry:
+        VERIFY_NOT_REACHED();
+        break;
     }
-
-    Web::Cookie::Cookie cookie;
-    bool had_any_results { false };
-};
-
-void CookieJar::select_cookie_from_database(Web::Cookie::Cookie cookie, OnCookieFound on_result, OnCookieNotFound on_complete_without_results)
-{
-    m_storage.visit(
-        [&](PersistedStorage& storage) {
-            auto wrapped_cookie = make_ref_counted<WrappedCookie>(move(cookie));
-
-            storage.database.execute_statement(
-                storage.statements.select_cookie,
-                [on_result = move(on_result), wrapped_cookie = wrapped_cookie](auto row) {
-                    if (auto selected_cookie = parse_cookie(row); selected_cookie.is_error())
-                        dbgln("Failed to parse cookie '{}': {}", selected_cookie.error(), row);
-                    else
-                        on_result(wrapped_cookie->cookie, selected_cookie.release_value());
-
-                    wrapped_cookie->had_any_results = true;
-                },
-                [on_complete_without_results = move(on_complete_without_results), wrapped_cookie = wrapped_cookie]() {
-                    if (!wrapped_cookie->had_any_results)
-                        on_complete_without_results(move(wrapped_cookie->cookie));
-                },
-                {},
-                wrapped_cookie->cookie.name.to_byte_string(),
-                wrapped_cookie->cookie.domain.to_byte_string(),
-                wrapped_cookie->cookie.path.to_byte_string());
-        },
-        [&](TransientStorage& storage) {
-            CookieStorageKey key { cookie.name.to_byte_string(), cookie.domain.to_byte_string(), cookie.path.to_byte_string() };
-
-            if (auto it = storage.find(key); it != storage.end())
-                on_result(cookie, it->value);
-            else
-                on_complete_without_results(cookie);
-        });
 }
 
-void CookieJar::select_all_cookies_from_database(OnSelectAllCookiesResult on_result)
+Optional<Web::Cookie::Cookie> CookieJar::TransientStorage::get_cookie(CookieStorageKey const& key)
 {
-    // FIXME: Make surrounding APIs asynchronous.
-    m_storage.visit(
-        [&](PersistedStorage& storage) {
-            storage.database.execute_statement(
-                storage.statements.select_all_cookies,
-                [on_result = move(on_result)](auto row) {
-                    if (auto cookie = parse_cookie(row); cookie.is_error())
-                        dbgln("Failed to parse cookie '{}': {}", cookie.error(), row);
-                    else
-                        on_result(cookie.release_value());
-                },
-                {},
-                {});
-        },
-        [&](TransientStorage& storage) {
-            for (auto const& cookie : storage)
-                on_result(cookie.value);
-        });
+    return m_cookies.get(key);
 }
 
-void CookieJar::purge_expired_cookies()
+UnixDateTime CookieJar::TransientStorage::purge_expired_cookies()
 {
     auto now = UnixDateTime::now();
+    auto is_expired = [&](auto const&, auto const& cookie) { return cookie.expiry_time < now; };
 
-    m_storage.visit(
-        [&](PersistedStorage& storage) {
-            storage.database.execute_statement(storage.statements.expire_cookie, {}, {}, {}, now);
+    m_cookies.remove_all_matching(is_expired);
+    m_inserted_cookies.remove_all_matching(is_expired);
+    m_updated_cookies.remove_all_matching(is_expired);
+
+    return now;
+}
+
+void CookieJar::PersistedStorage::insert_cookie(Web::Cookie::Cookie const& cookie)
+{
+    database.execute_statement(
+        statements.insert_cookie,
+        {}, {}, {},
+        cookie.name,
+        cookie.value,
+        to_underlying(cookie.same_site),
+        cookie.creation_time,
+        cookie.last_access_time,
+        cookie.expiry_time,
+        cookie.domain,
+        cookie.path,
+        cookie.secure,
+        cookie.http_only,
+        cookie.host_only,
+        cookie.persistent);
+}
+
+void CookieJar::PersistedStorage::update_cookie(Web::Cookie::Cookie const& cookie)
+{
+    database.execute_statement(
+        statements.update_cookie,
+        {}, {}, {},
+        cookie.value,
+        to_underlying(cookie.same_site),
+        cookie.creation_time,
+        cookie.last_access_time,
+        cookie.expiry_time,
+        cookie.secure,
+        cookie.http_only,
+        cookie.host_only,
+        cookie.persistent,
+        cookie.name,
+        cookie.domain,
+        cookie.path);
+}
+
+CookieJar::TransientStorage::Cookies CookieJar::PersistedStorage::select_all_cookies()
+{
+    HashMap<CookieStorageKey, Web::Cookie::Cookie> cookies;
+
+    auto add_cookie = [&](auto cookie) {
+        CookieStorageKey key { cookie.name, cookie.domain, cookie.path };
+        cookies.set(move(key), move(cookie));
+    };
+
+    database.execute_statement(
+        statements.select_all_cookies,
+        [&](auto row) {
+            if (auto cookie = parse_cookie(row); cookie.is_error())
+                dbgln("Failed to parse cookie '{}': {}", cookie.error(), row);
+            else
+                add_cookie(cookie.release_value());
         },
-        [&](TransientStorage& storage) {
-            Vector<CookieStorageKey> keys_to_evict;
+        {},
+        {});
 
-            for (auto const& cookie : storage) {
-                if (cookie.value.expiry_time < now)
-                    keys_to_evict.append(cookie.key);
-            }
-
-            for (auto const& key : keys_to_evict)
-                storage.remove(key);
-        });
+    return cookies;
 }
 
 }

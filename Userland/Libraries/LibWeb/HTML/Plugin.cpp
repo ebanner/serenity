@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/PluginPrototype.h>
 #include <LibWeb/HTML/Plugin.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
@@ -30,7 +31,7 @@ Plugin::~Plugin() = default;
 void Plugin::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::PluginPrototype>(realm, "Plugin"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Plugin);
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-plugin-name

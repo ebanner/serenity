@@ -8,13 +8,16 @@
 
 #include <LibWeb/Painting/BorderPainting.h>
 #include <LibWeb/Painting/BorderRadiusCornerClipper.h>
+#include <LibWeb/Painting/ClipFrame.h>
+#include <LibWeb/Painting/ClippableAndScrollable.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/PaintableFragment.h>
 #include <LibWeb/Painting/ShadowPainting.h>
 
 namespace Web::Painting {
 
-class PaintableBox : public Paintable {
+class PaintableBox : public Paintable
+    , public ClippableAndScrollable {
     JS_CELL(PaintableBox, Paintable);
 
 public:
@@ -26,9 +29,9 @@ public:
 
     virtual void paint(PaintContext&, PaintPhase) const override;
 
-    virtual Optional<CSSPixelRect> get_masking_area() const { return {}; }
-    virtual Optional<Gfx::Bitmap::MaskKind> get_mask_type() const { return {}; }
-    virtual RefPtr<Gfx::Bitmap> calculate_mask(PaintContext&, CSSPixelRect const&) const { return {}; }
+    virtual Optional<CSSPixelRect> get_masking_area() const;
+    virtual Optional<Gfx::Bitmap::MaskKind> get_mask_type() const;
+    virtual RefPtr<Gfx::Bitmap> calculate_mask(PaintContext&, CSSPixelRect const&) const;
 
     Layout::Box& layout_box() { return static_cast<Layout::Box&>(Paintable::layout_node()); }
     Layout::Box const& layout_box() const { return static_cast<Layout::Box const&>(Paintable::layout_node()); }
@@ -117,8 +120,6 @@ public:
         return m_overflow_data->scrollable_overflow_rect;
     }
 
-    Optional<CSSPixelRect> calculate_overflow_clipped_rect() const;
-
     void set_overflow_data(OverflowData data) { m_overflow_data = move(data); }
 
     DOM::Node const* dom_node() const { return layout_box().dom_node(); }
@@ -132,7 +133,8 @@ public:
     virtual void apply_clip_overflow_rect(PaintContext&, PaintPhase) const override;
     virtual void clear_clip_overflow_rect(PaintContext&, PaintPhase) const override;
 
-    virtual Optional<HitTestResult> hit_test(CSSPixelPoint, HitTestType) const override;
+    [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const override;
+    Optional<HitTestResult> hit_test(CSSPixelPoint, HitTestType) const;
 
     virtual bool handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned buttons, unsigned modifiers, int wheel_delta_x, int wheel_delta_y) override;
 
@@ -191,10 +193,18 @@ public:
     void set_transform_origin(CSSPixelPoint transform_origin) { m_transform_origin = transform_origin; }
     CSSPixelPoint const& transform_origin() const { return m_transform_origin; }
 
-protected:
-    explicit PaintableBox(Layout::Box const&);
+    void set_outline_data(Optional<BordersData> outline_data) { m_outline_data = outline_data; }
+    Optional<BordersData> const& outline_data() const { return m_outline_data; }
+
+    void set_outline_offset(CSSPixels outline_offset) { m_outline_offset = outline_offset; }
+    CSSPixels outline_offset() const { return m_outline_offset; }
+
+    CSSPixelRect compute_absolute_padding_rect_with_css_transform_applied() const;
 
     Optional<CSSPixelRect> get_clip_rect() const;
+
+protected:
+    explicit PaintableBox(Layout::Box const&);
 
     virtual void paint_border(PaintContext&) const;
     virtual void paint_backdrop_filter(PaintContext&) const;
@@ -207,6 +217,13 @@ protected:
 private:
     [[nodiscard]] virtual bool is_paintable_box() const final { return true; }
 
+    enum class ScrollDirection {
+        Horizontal,
+        Vertical,
+    };
+    [[nodiscard]] Optional<CSSPixelRect> scroll_thumb_rect(ScrollDirection) const;
+    [[nodiscard]] bool is_scrollable(ScrollDirection) const;
+
     Optional<OverflowData> m_overflow_data;
 
     CSSPixelPoint m_offset;
@@ -215,10 +232,11 @@ private:
     Optional<CSSPixelRect> mutable m_absolute_rect;
     Optional<CSSPixelRect> mutable m_absolute_paint_rect;
 
-    Optional<CSSPixelRect> mutable m_clip_rect;
-
     mutable bool m_clipping_overflow { false };
-    mutable Optional<u32> m_corner_clipper_id;
+    mutable Vector<u32> m_corner_clipper_ids;
+
+    RefPtr<ScrollFrame const> m_enclosing_scroll_frame;
+    RefPtr<ClipFrame const> m_enclosing_clip_frame;
 
     Optional<BordersDataWithElementKind> m_override_borders_data;
     Optional<TableCellCoordinates> m_table_cell_coordinates;
@@ -227,6 +245,9 @@ private:
     Vector<ShadowData> m_box_shadow_data;
     Gfx::FloatMatrix4x4 m_transform { Gfx::FloatMatrix4x4::identity() };
     CSSPixelPoint m_transform_origin;
+
+    Optional<BordersData> m_outline_data;
+    CSSPixels m_outline_offset { 0 };
 };
 
 class PaintableWithLines : public PaintableBox {
@@ -261,7 +282,7 @@ public:
     virtual void paint(PaintContext&, PaintPhase) const override;
     virtual bool wants_mouse_events() const override { return false; }
 
-    virtual Optional<HitTestResult> hit_test(CSSPixelPoint, HitTestType) const override;
+    [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const override;
 
     virtual void visit_edges(Cell::Visitor& visitor) override
     {
@@ -279,8 +300,8 @@ private:
     Vector<PaintableFragment> m_fragments;
 };
 
-void paint_text_decoration(PaintContext& context, Layout::Node const& text_node, PaintableFragment const& fragment);
-void paint_cursor_if_needed(PaintContext& context, Layout::TextNode const& text_node, PaintableFragment const& fragment);
-void paint_text_fragment(PaintContext& context, Layout::TextNode const& text_node, PaintableFragment const& fragment, PaintPhase phase);
+void paint_text_decoration(PaintContext&, TextPaintable const&, PaintableFragment const&);
+void paint_cursor_if_needed(PaintContext&, TextPaintable const&, PaintableFragment const&);
+void paint_text_fragment(PaintContext&, TextPaintable const&, PaintableFragment const&, PaintPhase);
 
 }

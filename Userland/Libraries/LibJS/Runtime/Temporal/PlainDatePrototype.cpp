@@ -369,7 +369,7 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::add)
     auto temporal_date = TRY(typed_this_object(vm));
 
     // 3. Let duration be ? ToTemporalDuration(temporalDurationLike).
-    auto* duration = TRY(to_temporal_duration(vm, vm.argument(0)));
+    auto duration = TRY(to_temporal_duration(vm, vm.argument(0)));
 
     // 4. Set options to ? GetOptionsObject(options).
     auto* options = TRY(get_options_object(vm, vm.argument(1)));
@@ -386,13 +386,13 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::subtract)
     auto temporal_date = TRY(typed_this_object(vm));
 
     // 3. Let duration be ? ToTemporalDuration(temporalDurationLike).
-    auto* duration = TRY(to_temporal_duration(vm, vm.argument(0)));
+    auto duration = TRY(to_temporal_duration(vm, vm.argument(0)));
 
     // 4. Set options to ? GetOptionsObject(options).
     auto* options = TRY(get_options_object(vm, vm.argument(1)));
 
     // 5. Let negatedDuration be ! CreateNegatedTemporalDuration(duration).
-    auto* negated_duration = create_negated_temporal_duration(vm, *duration);
+    auto negated_duration = create_negated_temporal_duration(vm, *duration);
 
     // 6. Return ? CalendarDateAdd(temporalDate.[[Calendar]], temporalDate, negatedDuration, options).
     return TRY(calendar_date_add(vm, temporal_date->calendar(), temporal_date, *negated_duration, options));
@@ -596,7 +596,7 @@ JS_DEFINE_NATIVE_FUNCTION(PlainDatePrototype::to_zoned_date_time)
     }
 
     // 7. Let instant be ? BuiltinTimeZoneGetInstantFor(timeZone, temporalDateTime, "compatible").
-    auto* instant = TRY(builtin_time_zone_get_instant_for(vm, time_zone, *temporal_date_time, "compatible"sv));
+    auto instant = TRY(builtin_time_zone_get_instant_for(vm, time_zone, *temporal_date_time, "compatible"sv));
 
     // 8. Return ! CreateTemporalZonedDateTime(instant.[[Nanoseconds]], timeZone, temporalDate.[[Calendar]]).
     return MUST(create_temporal_zoned_date_time(vm, instant->nanoseconds(), *time_zone, temporal_date->calendar()));

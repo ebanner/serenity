@@ -12,9 +12,9 @@
 #include <AK/Vector.h>
 #include <LibGfx/Font/UnicodeRange.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
-#include <LibWeb/CSS/FontFace.h>
 #include <LibWeb/CSS/GeneralEnclosed.h>
 #include <LibWeb/CSS/MediaQuery.h>
+#include <LibWeb/CSS/ParsedFontFace.h>
 #include <LibWeb/CSS/Parser/Block.h>
 #include <LibWeb/CSS/Parser/ComponentValue.h>
 #include <LibWeb/CSS/Parser/Declaration.h>
@@ -44,7 +44,7 @@ public:
 
     Parser(Parser&&);
 
-    CSSStyleSheet* parse_as_css_stylesheet(Optional<AK::URL> location);
+    CSSStyleSheet* parse_as_css_stylesheet(Optional<URL::URL> location);
     ElementInlineCSSStyleDeclaration* parse_as_style_attribute(DOM::Element&);
     CSSRule* parse_as_css_rule();
     Optional<StyleProperty> parse_as_supports_condition();
@@ -69,7 +69,9 @@ public:
 
     Optional<ComponentValue> parse_as_component_value();
 
-    static NonnullRefPtr<StyleValue> resolve_unresolved_style_value(Badge<StyleComputer>, ParsingContext const&, DOM::Element&, Optional<CSS::Selector::PseudoElement::Type>, PropertyID, UnresolvedStyleValue const&);
+    Vector<ParsedFontFace::Source> parse_as_font_face_src();
+
+    static NonnullRefPtr<StyleValue> resolve_unresolved_style_value(ParsingContext const&, DOM::Element&, Optional<CSS::Selector::PseudoElement::Type>, PropertyID, UnresolvedStyleValue const&);
 
     [[nodiscard]] LengthOrCalculated parse_as_sizes_attribute();
 
@@ -86,11 +88,11 @@ private:
 
     // "Parse a stylesheet" is intended to be the normal parser entry point, for parsing stylesheets.
     struct ParsedStyleSheet {
-        Optional<AK::URL> location;
+        Optional<URL::URL> location;
         Vector<NonnullRefPtr<Rule>> rules;
     };
     template<typename T>
-    ParsedStyleSheet parse_a_stylesheet(TokenStream<T>&, Optional<AK::URL> location);
+    ParsedStyleSheet parse_a_stylesheet(TokenStream<T>&, Optional<URL::URL> location);
 
     // "Parse a list of rules" is intended for the content of at-rules such as @media. It differs from "Parse a stylesheet" in the handling of <CDO-token> and <CDC-token>.
     template<typename T>
@@ -162,7 +164,9 @@ private:
     Optional<GeneralEnclosed> parse_general_enclosed(TokenStream<ComponentValue>&);
 
     CSSRule* parse_font_face_rule(TokenStream<ComponentValue>&);
-    Vector<FontFace::Source> parse_font_face_src(TokenStream<ComponentValue>&);
+
+    template<typename T>
+    Vector<ParsedFontFace::Source> parse_font_face_src(TokenStream<T>&);
 
     CSSRule* convert_to_rule(NonnullRefPtr<Rule>);
     CSSMediaRule* convert_to_media_rule(NonnullRefPtr<Rule>);
@@ -190,14 +194,20 @@ private:
     Optional<Ratio> parse_ratio(TokenStream<ComponentValue>&);
     Optional<Gfx::UnicodeRange> parse_unicode_range(TokenStream<ComponentValue>&);
     Optional<Gfx::UnicodeRange> parse_unicode_range(StringView);
+    Vector<Gfx::UnicodeRange> parse_unicode_ranges(TokenStream<ComponentValue>&);
     Optional<GridSize> parse_grid_size(ComponentValue const&);
     Optional<GridMinMax> parse_min_max(Vector<ComponentValue> const&);
     Optional<GridRepeat> parse_repeat(Vector<ComponentValue> const&);
     Optional<ExplicitGridTrack> parse_track_sizing_function(ComponentValue const&);
 
-    Optional<AK::URL> parse_url_function(ComponentValue const&);
-    RefPtr<StyleValue> parse_url_value(ComponentValue const&);
+    Optional<URL::URL> parse_url_function(ComponentValue const&);
+    RefPtr<StyleValue> parse_url_value(TokenStream<ComponentValue>&);
 
+    RefPtr<StyleValue> parse_basic_shape_function(ComponentValue const&);
+    RefPtr<StyleValue> parse_basic_shape_value(TokenStream<ComponentValue>&);
+
+    template<typename TElement>
+    Optional<Vector<TElement>> parse_color_stop_list(TokenStream<ComponentValue>& tokens, auto is_position, auto get_position);
     Optional<Vector<LinearColorStopListElement>> parse_linear_color_stop_list(TokenStream<ComponentValue>&);
     Optional<Vector<AngularColorStopListElement>> parse_angular_color_stop_list(TokenStream<ComponentValue>&);
 
@@ -217,16 +227,16 @@ private:
     // NOTE: Implemented in generated code. (GenerateCSSMathFunctions.cpp)
     OwnPtr<CalculationNode> parse_math_function(PropertyID, Function const&);
     OwnPtr<CalculationNode> parse_a_calc_function_node(Function const&);
-    RefPtr<StyleValue> parse_dimension_value(ComponentValue const&);
+    RefPtr<StyleValue> parse_dimension_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_integer_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_number_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_number_or_percentage_value(TokenStream<ComponentValue>&);
-    RefPtr<StyleValue> parse_identifier_value(ComponentValue const&);
-    RefPtr<StyleValue> parse_color_value(ComponentValue const&);
-    RefPtr<StyleValue> parse_rect_value(ComponentValue const&);
+    RefPtr<StyleValue> parse_identifier_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue> parse_color_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue> parse_rect_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_ratio_value(TokenStream<ComponentValue>&);
-    RefPtr<StyleValue> parse_string_value(ComponentValue const&);
-    RefPtr<StyleValue> parse_image_value(ComponentValue const&);
+    RefPtr<StyleValue> parse_string_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue> parse_image_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_paint_value(TokenStream<ComponentValue>&);
     enum class PositionParsingMode {
         Normal,
@@ -271,6 +281,7 @@ private:
     RefPtr<StyleValue> parse_easing_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_transform_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_transform_origin_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue> parse_transition_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue> parse_grid_track_size_list(TokenStream<ComponentValue>&, bool allow_separate_line_name_blocks = false);
     RefPtr<StyleValue> parse_grid_auto_track_sizes(TokenStream<ComponentValue>&);
     RefPtr<GridAutoFlowStyleValue> parse_grid_auto_flow_value(TokenStream<ComponentValue>&);
@@ -307,9 +318,9 @@ private:
     Optional<Supports::Feature> parse_supports_feature(TokenStream<ComponentValue>&);
 
     NonnullRefPtr<StyleValue> resolve_unresolved_style_value(DOM::Element&, Optional<Selector::PseudoElement::Type>, PropertyID, UnresolvedStyleValue const&);
-    bool expand_variables(DOM::Element&, Optional<Selector::PseudoElement::Type>, StringView property_name, HashMap<FlyString, NonnullRefPtr<PropertyDependencyNode>>& dependencies, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest);
-    bool expand_unresolved_values(DOM::Element&, StringView property_name, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest);
-    bool substitute_attr_function(DOM::Element& element, StringView property_name, Function const& attr_function, Vector<ComponentValue>& dest);
+    bool expand_variables(DOM::Element&, Optional<Selector::PseudoElement::Type>, FlyString const& property_name, HashMap<FlyString, NonnullRefPtr<PropertyDependencyNode>>& dependencies, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest);
+    bool expand_unresolved_values(DOM::Element&, FlyString const& property_name, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest);
+    bool substitute_attr_function(DOM::Element& element, FlyString const& property_name, Function const& attr_function, Vector<ComponentValue>& dest);
 
     static bool has_ignored_vendor_prefix(StringView);
 
@@ -330,7 +341,7 @@ private:
 
 namespace Web {
 
-CSS::CSSStyleSheet* parse_css_stylesheet(CSS::Parser::ParsingContext const&, StringView, Optional<AK::URL> location = {});
+CSS::CSSStyleSheet* parse_css_stylesheet(CSS::Parser::ParsingContext const&, StringView, Optional<URL::URL> location = {});
 CSS::ElementInlineCSSStyleDeclaration* parse_css_style_attribute(CSS::Parser::ParsingContext const&, StringView, DOM::Element&);
 RefPtr<CSS::StyleValue> parse_css_value(CSS::Parser::ParsingContext const&, StringView, CSS::PropertyID property_id = CSS::PropertyID::Invalid);
 Optional<CSS::SelectorList> parse_selector(CSS::Parser::ParsingContext const&, StringView);

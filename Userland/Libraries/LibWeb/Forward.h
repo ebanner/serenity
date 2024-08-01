@@ -8,7 +8,6 @@
 #pragma once
 
 #include <LibJS/Forward.h>
-#include <LibWeb/Bindings/Forward.h>
 
 namespace Web {
 class EditEventHandler;
@@ -19,6 +18,7 @@ class PageClient;
 class PaintContext;
 class Resource;
 class ResourceLoader;
+enum class TraversalDecision;
 class XMLDocumentBuilder;
 }
 
@@ -27,6 +27,7 @@ class RecordingPainter;
 }
 
 namespace Web::Animations {
+class Animatable;
 class Animation;
 class AnimationEffect;
 class AnimationPlaybackEvent;
@@ -60,6 +61,7 @@ enum class RequestCredentials;
 enum class RequestDestination;
 enum class RequestDuplex;
 enum class RequestMode;
+enum class RequestPriority;
 enum class RequestRedirect;
 enum class ResizeObserverBoxOptions;
 enum class ResponseType;
@@ -90,7 +92,9 @@ class AnglePercentage;
 class AngleStyleValue;
 class BackgroundRepeatStyleValue;
 class BackgroundSizeStyleValue;
+class BasicShapeStyleValue;
 class BorderRadiusStyleValue;
+class CSSAnimation;
 class CSSConditionRule;
 class CSSFontFaceRule;
 class CSSGroupingRule;
@@ -103,6 +107,7 @@ class CSSRuleList;
 class CSSStyleDeclaration;
 class CSSStyleRule;
 class CSSStyleSheet;
+struct CSSStyleSheetInit;
 class CSSSupportsRule;
 class CalculatedStyleValue;
 class Clip;
@@ -121,6 +126,7 @@ class Flex;
 class FlexOrCalculated;
 class FlexStyleValue;
 class FontFace;
+class FontFaceSet;
 class Frequency;
 class FrequencyOrCalculated;
 class FrequencyPercentage;
@@ -155,6 +161,7 @@ class MediaQueryListEvent;
 class Number;
 class NumberOrCalculated;
 class NumberStyleValue;
+class ParsedFontFace;
 class Percentage;
 class PercentageOrCalculated;
 class PercentageStyleValue;
@@ -169,6 +176,7 @@ class ResolutionOrCalculated;
 class ResolutionStyleValue;
 class RevertStyleValue;
 class Screen;
+class ScreenOrientation;
 class Selector;
 class ShadowStyleValue;
 class ShorthandStyleValue;
@@ -188,6 +196,7 @@ class TimePercentage;
 class TimeStyleValue;
 class Transformation;
 class TransformationStyleValue;
+class TransitionStyleValue;
 class URLStyleValue;
 class UnresolvedStyleValue;
 class UnsetStyleValue;
@@ -297,6 +306,7 @@ class FetchController;
 class FetchParams;
 class FetchTimingInfo;
 class HeaderList;
+class IncrementalReadLoopReadRequest;
 class Request;
 class Response;
 
@@ -340,8 +350,11 @@ class DOMStringMap;
 class ErrorEvent;
 class EventHandler;
 class EventLoop;
+class EventSource;
+class FormAssociatedElement;
 class FormDataEvent;
 class History;
+class HTMLAllCollection;
 class HTMLAnchorElement;
 class HTMLAreaElement;
 class HTMLAudioElement;
@@ -416,6 +429,7 @@ class HTMLTrackElement;
 class HTMLUListElement;
 class HTMLUnknownElement;
 class HTMLVideoElement;
+class ImageBitmap;
 class ImageData;
 class ImageRequest;
 class ListOfAvailableImages;
@@ -441,6 +455,7 @@ class Path2D;
 class Plugin;
 class PluginArray;
 class PromiseRejectionEvent;
+class SelectedFile;
 class SharedImageRequest;
 class Storage;
 class SubmitEvent;
@@ -451,6 +466,7 @@ class ToggleEvent;
 class TrackEvent;
 struct TransferDataHolder;
 class TraversableNavigable;
+class UserActivation;
 class VideoTrack;
 class VideoTrackList;
 class Window;
@@ -464,6 +480,7 @@ class WorkerGlobalScope;
 class WorkerLocation;
 class WorkerNavigator;
 
+enum class AllowMultipleFiles;
 enum class MediaSeekMode;
 enum class SandboxingFlagSet;
 
@@ -477,12 +494,18 @@ struct POSTResource;
 struct ScrollOptions;
 struct ScrollToOptions;
 struct SerializedFormData;
-struct SessionHistoryEntry;
+class SessionHistoryEntry;
 struct ToggleTaskTracker;
 }
 
 namespace Web::HighResolutionTime {
 class Performance;
+}
+
+namespace Web::IndexedDB {
+class IDBFactory;
+class IDBOpenDBRequest;
+class IDBRequest;
 }
 
 namespace Web::Internals {
@@ -505,6 +528,7 @@ class ButtonBox;
 class CheckBox;
 class FlexFormattingContext;
 class FormattingContext;
+class ImageBox;
 class InlineFormattingContext;
 class Label;
 class LabelableNode;
@@ -622,9 +646,11 @@ struct UnderlyingSource;
 
 namespace Web::SVG {
 class SVGAnimatedLength;
+class SVGAnimatedRect;
 class SVGCircleElement;
 class SVGClipPathElement;
 class SVGDefsElement;
+class SVGDescElement;
 class SVGElement;
 class SVGEllipseElement;
 class SVGForeignObjectElement;
@@ -645,11 +671,12 @@ class SVGTitleElement;
 namespace Web::UIEvents {
 class KeyboardEvent;
 class MouseEvent;
+class PointerEvent;
 class UIEvents;
 }
 
-namespace Web::URL {
-class URL;
+namespace Web::DOMURL {
+class DOMURL;
 class URLSearchParams;
 class URLSearchParamsIterator;
 }
@@ -667,12 +694,23 @@ class Table;
 }
 
 namespace Web::WebAudio {
+class AudioBuffer;
 class AudioContext;
+class AudioNode;
+class AudioParam;
+class AudioScheduledSourceNode;
 class BaseAudioContext;
+class DynamicsCompressorNode;
+class GainNode;
+class OfflineAudioContext;
+class OscillatorNode;
+class PeriodicWave;
 
 enum class AudioContextState;
 
 struct AudioContextOptions;
+struct DynamicsCompressorOptions;
+struct OscillatorOptions;
 }
 
 namespace Web::WebGL {

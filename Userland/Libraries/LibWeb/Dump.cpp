@@ -53,9 +53,9 @@ static void indent(StringBuilder& builder, int levels)
 static ErrorOr<void> dump_session_history_entry(StringBuilder& builder, HTML::SessionHistoryEntry const& session_history_entry, int indent_levels)
 {
     indent(builder, indent_levels);
-    auto const& document = session_history_entry.document_state->document();
-    TRY(builder.try_appendff("step=({}) url=({}) is-active=({})\n", session_history_entry.step.get<int>(), session_history_entry.url, document && document->is_active()));
-    for (auto const& nested_history : session_history_entry.document_state->nested_histories()) {
+    auto const& document = session_history_entry.document();
+    TRY(builder.try_appendff("step=({}) url=({}) is-active=({})\n", session_history_entry.step().get<int>(), session_history_entry.url(), document && document->is_active()));
+    for (auto const& nested_history : session_history_entry.document_state()->nested_histories()) {
         for (auto const& nested_she : nested_history.entries) {
             TRY(dump_session_history_entry(builder, *nested_she, indent_levels + 1));
         }
@@ -97,7 +97,7 @@ void dump_tree(StringBuilder& builder, DOM::Node const& node)
     }
     ++indent;
     if (is<DOM::Element>(node)) {
-        if (auto* shadow_root = static_cast<DOM::Element const&>(node).shadow_root_internal()) {
+        if (auto shadow_root = static_cast<DOM::Element const&>(node).shadow_root()) {
             dump_tree(builder, *shadow_root);
         }
     }
@@ -118,6 +118,7 @@ void dump_tree(StringBuilder& builder, DOM::Node const& node)
         if (!is<HTML::HTMLTemplateElement>(node)) {
             static_cast<DOM::ParentNode const&>(node).for_each_child([&](auto& child) {
                 dump_tree(builder, child);
+                return IterationDecision::Continue;
             });
         } else {
             auto& template_element = verify_cast<HTML::HTMLTemplateElement>(node);
@@ -384,12 +385,12 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
 
     if (show_specified_style && layout_node.dom_node() && layout_node.dom_node()->is_element() && verify_cast<DOM::Element>(layout_node.dom_node())->computed_css_values()) {
         struct NameAndValue {
-            String name;
+            FlyString name;
             String value;
         };
         Vector<NameAndValue> properties;
         verify_cast<DOM::Element>(*layout_node.dom_node()).computed_css_values()->for_each_property([&](auto property_id, auto& value) {
-            properties.append({ MUST(String::from_utf8(CSS::string_from_property_id(property_id))), value.to_string() });
+            properties.append({ CSS::string_from_property_id(property_id), value.to_string() });
         });
         quick_sort(properties, [](auto& a, auto& b) { return a.name < b.name; });
 
@@ -403,6 +404,7 @@ void dump_tree(StringBuilder& builder, Layout::Node const& layout_node, bool sho
     ++indent;
     layout_node.for_each_child([&](auto& child) {
         dump_tree(builder, child, show_box_model, show_specified_style, interactive);
+        return IterationDecision::Continue;
     });
     --indent;
 }
@@ -647,8 +649,8 @@ void dump_font_face_rule(StringBuilder& builder, CSS::CSSFontFaceRule const& rul
     builder.append("sources:\n"sv);
     for (auto const& source : font_face.sources()) {
         indent(builder, indent_levels + 2);
-        if (source.local_or_url.has<AK::URL>())
-            builder.appendff("url={}, format={}\n", source.local_or_url.get<AK::URL>(), source.format.value_or("???"_string));
+        if (source.local_or_url.has<URL::URL>())
+            builder.appendff("url={}, format={}\n", source.local_or_url.get<URL::URL>(), source.format.value_or("???"_string));
         else
             builder.appendff("local={}\n", source.local_or_url.get<AK::String>());
     }
@@ -694,15 +696,14 @@ ErrorOr<void> dump_style_rule(StringBuilder& builder, CSS::CSSStyleRule const& r
     }
     indent(builder, indent_levels);
     builder.append("  Declarations:\n"sv);
-    auto& style_declaration = verify_cast<CSS::PropertyOwningCSSStyleDeclaration>(rule.declaration());
-    for (auto& property : style_declaration.properties()) {
+    for (auto& property : rule.declaration().properties()) {
         indent(builder, indent_levels);
         builder.appendff("    {}: '{}'", CSS::string_from_property_id(property.property_id), property.value->to_string());
         if (property.important == CSS::Important::Yes)
             builder.append(" \033[31;1m!important\033[0m"sv);
         builder.append('\n');
     }
-    for (auto& property : style_declaration.custom_properties()) {
+    for (auto& property : rule.declaration().custom_properties()) {
         indent(builder, indent_levels);
         builder.appendff("    {}: '{}'", property.key, property.value.value->to_string());
         if (property.value.important == CSS::Important::Yes)

@@ -50,6 +50,10 @@
     "normal",
     "reverse"
   ],
+  "animation-play-state": [
+    "paused",
+    "running"
+  ],
   "appearance": [
     "auto",
     "button",
@@ -76,7 +80,8 @@
   "background-box": [
     "border-box",
     "content-box",
-    "padding-box"
+    "padding-box",
+    "text"
   ],
   "border-collapse": [
     "separate",
@@ -357,6 +362,11 @@
     "middle",
     "end"
   ],
+  "scrollbar-width": [
+    "auto",
+    "thin",
+    "none"
+  ],
   "text-align": [
     "center",
     "justify",
@@ -395,6 +405,13 @@
     "math-auto",
     "none",
     "uppercase"
+  ],
+  "transform-box": [
+    "content-box",
+    "border-box",
+    "fill-box",
+    "stroke-box",
+    "view-box "
   ],
   "vertical-align": [
     "baseline",

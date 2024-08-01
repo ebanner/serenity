@@ -19,6 +19,14 @@
 
 namespace Web::HTML {
 
+Environment::~Environment() = default;
+
+void Environment::visit_edges(Cell::Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(target_browsing_context);
+}
+
 EnvironmentSettingsObject::EnvironmentSettingsObject(NonnullOwnPtr<JS::ExecutionContext> realm_execution_context)
     : m_realm_execution_context(move(realm_execution_context))
 {
@@ -42,7 +50,7 @@ void EnvironmentSettingsObject::initialize(JS::Realm& realm)
 void EnvironmentSettingsObject::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(target_browsing_context);
+    visitor.visit(m_responsible_event_loop);
     visitor.visit(m_module_map);
     visitor.ignore(m_outstanding_rejected_promises_weak_set);
     m_realm_execution_context->visit_edges(visitor);
@@ -84,8 +92,8 @@ EventLoop& EnvironmentSettingsObject::responsible_event_loop()
 
     auto& vm = global_object().vm();
     auto& event_loop = verify_cast<Bindings::WebEngineCustomData>(vm.custom_data())->event_loop;
-    m_responsible_event_loop = &event_loop;
-    return event_loop;
+    m_responsible_event_loop = event_loop;
+    return *event_loop;
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#check-if-we-can-run-script
@@ -161,7 +169,7 @@ void EnvironmentSettingsObject::prepare_to_run_callback()
 }
 
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#parse-a-url
-AK::URL EnvironmentSettingsObject::parse_url(StringView url)
+URL::URL EnvironmentSettingsObject::parse_url(StringView url)
 {
     // 1. Let encoding be document's character encoding, if document was given, and environment settings object's API URL character encoding otherwise.
     // FIXME: Pass in environment settings object's API URL character encoding.
@@ -234,12 +242,15 @@ void EnvironmentSettingsObject::notify_about_rejected_promises(Badge<EventLoop>)
     m_about_to_be_notified_rejected_promises_list.clear();
 
     // 4. Let global be settings object's global object.
-    auto& global = global_object();
+    // We need this as an event target for the unhandledrejection event below
+    auto& global = verify_cast<DOM::EventTarget>(global_object());
 
     // 5. Queue a global task on the DOM manipulation task source given global to run the following substep:
-    queue_global_task(Task::Source::DOMManipulation, global, [this, &global, list = move(list)] {
+    queue_global_task(Task::Source::DOMManipulation, global, JS::create_heap_function(heap(), [this, &global, list = move(list)] {
+        auto& realm = global.realm();
+
         // 1. For each promise p in list:
-        for (auto promise : list) {
+        for (auto const& promise : list) {
 
             // 1. If p's [[PromiseIsHandled]] internal slot is true, continue to the next iteration of the loop.
             if (promise->is_handled())
@@ -257,12 +268,10 @@ void EnvironmentSettingsObject::notify_about_rejected_promises(Badge<EventLoop>)
                 /* .promise = */ JS::make_handle(*promise),
                 /* .reason = */ promise->result(),
             };
-            // FIXME: This currently assumes that global is a WindowObject.
-            auto& window = verify_cast<HTML::Window>(global);
 
-            auto promise_rejection_event = PromiseRejectionEvent::create(window.realm(), HTML::EventNames::unhandledrejection, event_init);
+            auto promise_rejection_event = PromiseRejectionEvent::create(realm, HTML::EventNames::unhandledrejection, event_init);
 
-            bool not_handled = window.dispatch_event(*promise_rejection_event);
+            bool not_handled = global.dispatch_event(*promise_rejection_event);
 
             // 3. If notHandled is false, then the promise rejection is handled. Otherwise, the promise rejection is not handled.
 
@@ -273,9 +282,9 @@ void EnvironmentSettingsObject::notify_about_rejected_promises(Badge<EventLoop>)
             // This algorithm results in promise rejections being marked as handled or not handled. These concepts parallel handled and not handled script errors.
             // If a rejection is still not handled after this, then the rejection may be reported to a developer console.
             if (not_handled)
-                HTML::report_exception_to_console(promise->result(), realm(), ErrorInPromise::Yes);
+                HTML::report_exception_to_console(promise->result(), realm, ErrorInPromise::Yes);
         }
-    });
+    }));
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-script
@@ -486,6 +495,24 @@ bool is_non_secure_context(Environment const& environment)
 {
     // An environment is a non-secure context if it is not a secure context.
     return !is_secure_context(environment);
+}
+
+SerializedEnvironmentSettingsObject EnvironmentSettingsObject::serialize()
+{
+    SerializedEnvironmentSettingsObject object;
+
+    object.id = this->id;
+    object.creation_url = this->creation_url;
+    object.top_level_creation_url = this->top_level_creation_url;
+    object.top_level_origin = this->top_level_origin;
+
+    object.api_url_character_encoding = api_url_character_encoding();
+    object.api_base_url = api_base_url();
+    object.origin = origin();
+    object.policy_container = policy_container();
+    object.cross_origin_isolated_capability = cross_origin_isolated_capability();
+
+    return object;
 }
 
 }

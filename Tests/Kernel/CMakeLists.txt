@@ -50,6 +50,7 @@ set(LIBTEST_BASED_SOURCES
     TestKernelFilePermissions.cpp
     TestKernelPledge.cpp
     TestKernelUnveil.cpp
+    TestLoopDevice.cpp
     TestMemoryDeviceMmap.cpp
     TestMunMap.cpp
     TestProcFS.cpp
@@ -59,6 +60,10 @@ set(LIBTEST_BASED_SOURCES
     TestSigWait.cpp
     TestTCPSocket.cpp
 )
+
+if (ENABLE_KERNEL_COVERAGE_COLLECTION)
+    list(APPEND LIBTEST_BASED_SOURCES TestKCOV.cpp)
+endif()
 
 if (NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     list(APPEND LIBTEST_BASED_SOURCES TestEFault.cpp)

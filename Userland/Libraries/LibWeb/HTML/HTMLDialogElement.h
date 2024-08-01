@@ -18,11 +18,13 @@ class HTMLDialogElement final : public HTMLElement {
 public:
     virtual ~HTMLDialogElement() override;
 
+    virtual void removed_from(Node*) override;
+
     String return_value() const;
     void set_return_value(String);
 
-    void show();
-    void show_modal();
+    WebIDL::ExceptionOr<void> show();
+    WebIDL::ExceptionOr<void> show_modal();
     void close(Optional<String> return_value);
 
     // https://www.w3.org/TR/html-aria/#el-dialog
@@ -33,7 +35,12 @@ private:
 
     virtual void initialize(JS::Realm&) override;
 
+    void close_the_dialog(Optional<String> result);
+
+    void run_dialog_focusing_steps();
+
     String m_return_value;
+    bool m_is_modal { false };
 };
 
 }

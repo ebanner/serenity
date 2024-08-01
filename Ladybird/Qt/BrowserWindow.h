@@ -8,9 +8,11 @@
 #pragma once
 
 #include "Tab.h"
+#include <Ladybird/Qt/FindInPageWidget.h>
 #include <Ladybird/Types.h>
 #include <LibCore/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
+#include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWebView/Forward.h>
 #include <QIcon>
 #include <QLineEdit>
@@ -23,16 +25,24 @@ namespace Ladybird {
 
 class SettingsDialog;
 class WebContentView;
+class TaskManagerWindow;
 
 class BrowserWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    BrowserWindow(Vector<URL> const& initial_urls, WebView::CookieJar&, WebContentOptions const&, StringView webdriver_content_ipc_path);
+    BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::CookieJar&, WebContentOptions const&, StringView webdriver_content_ipc_path, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
 
     WebContentView& view() const { return m_current_tab->view(); }
 
+    int tab_count() { return m_tabs_container->count(); }
     int tab_index(Tab*);
+    Tab& create_new_tab(Web::HTML::ActivateTab activate_tab);
+
+    QMenu& hamburger_menu()
+    {
+        return *m_hamburger_menu;
+    }
 
     QAction& go_back_action()
     {
@@ -49,6 +59,16 @@ public:
         return *m_reload_action;
     }
 
+    QAction& new_tab_action()
+    {
+        return *m_new_tab_action;
+    }
+
+    QAction& new_window_action()
+    {
+        return *m_new_window_action;
+    }
+
     QAction& copy_selection_action()
     {
         return *m_copy_selection_action;
@@ -57,6 +77,16 @@ public:
     QAction& select_all_action()
     {
         return *m_select_all_action;
+    }
+
+    QAction& find_action()
+    {
+        return *m_find_in_page_action;
+    }
+
+    QAction& paste_action()
+    {
+        return *m_paste_action;
     }
 
     QAction& view_source_action()
@@ -69,14 +99,20 @@ public:
         return *m_inspect_dom_node_action;
     }
 
+    Tab* current_tab() const { return m_current_tab; }
+
 public slots:
     void device_pixel_ratio_changed(qreal dpi);
     void tab_title_changed(int index, QString const&);
     void tab_favicon_changed(int index, QIcon const& icon);
-    Tab& new_tab(QString const&, Web::HTML::ActivateTab);
-    Tab& new_tab(StringView html, Web::HTML::ActivateTab);
+    void tab_audio_play_state_changed(int index, Web::HTML::AudioPlayState);
+    void tab_navigation_buttons_state_changed(int index);
+    Tab& new_tab_from_url(URL::URL const&, Web::HTML::ActivateTab);
+    Tab& new_tab_from_content(StringView html, Web::HTML::ActivateTab);
+    Tab& new_child_tab(Web::HTML::ActivateTab, Tab& parent, Optional<u64> page_index);
     void activate_tab(int index);
     void close_tab(int index);
+    void move_tab(int old_index, int new_index);
     void close_current_tab();
     void open_next_tab();
     void open_previous_tab();
@@ -89,18 +125,22 @@ public slots:
     void reset_zoom();
     void update_zoom_menu();
     void select_all();
+    void show_find_in_page();
+    void paste();
     void copy_selected_text();
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
 
 private:
+    virtual bool event(QEvent*) override;
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void moveEvent(QMoveEvent*) override;
     virtual void wheelEvent(QWheelEvent*) override;
     virtual void closeEvent(QCloseEvent*) override;
 
-    Tab& create_new_tab(Web::HTML::ActivateTab activate_tab);
+    Tab& create_new_tab(Web::HTML::ActivateTab, Tab& parent, Optional<u64> page_index);
+    void initialize_tab(Tab*);
 
     void debug_request(ByteString const& request, ByteString const& argument = "");
 
@@ -116,6 +156,14 @@ private:
         }
     }
 
+    void create_close_button_for_tab(Tab*);
+
+    QIcon icon_for_page_mute_state(Tab&) const;
+    QString tool_tip_for_page_mute_state(Tab&) const;
+    QTabBar::ButtonPosition audio_button_position_for_tab(int tab_index) const;
+
+    void set_window_rect(Optional<Web::DevicePixels> x, Optional<Web::DevicePixels> y, Optional<Web::DevicePixels> width, Optional<Web::DevicePixels> height);
+
     QScreen* m_current_screen;
     double m_device_pixel_ratio { 0 };
 
@@ -123,11 +171,17 @@ private:
     Tab* m_current_tab { nullptr };
     QMenu* m_zoom_menu { nullptr };
 
+    QMenu* m_hamburger_menu { nullptr };
+
     QAction* m_go_back_action { nullptr };
     QAction* m_go_forward_action { nullptr };
     QAction* m_reload_action { nullptr };
+    QAction* m_new_tab_action { nullptr };
+    QAction* m_new_window_action { nullptr };
     QAction* m_copy_selection_action { nullptr };
+    QAction* m_paste_action { nullptr };
     QAction* m_select_all_action { nullptr };
+    QAction* m_find_in_page_action { nullptr };
     QAction* m_view_source_action { nullptr };
     QAction* m_inspect_dom_node_action { nullptr };
 

@@ -34,30 +34,50 @@
 
 namespace Web::CSS {
 
-void StyleProperties::set_property(CSS::PropertyID id, NonnullRefPtr<StyleValue const> value, CSS::CSSStyleDeclaration const* source_declaration)
+bool StyleProperties::is_property_important(CSS::PropertyID property_id) const
 {
-    m_property_values[to_underlying(id)] = StyleAndSourceDeclaration { move(value), source_declaration };
+    return m_property_values[to_underlying(property_id)].style && m_property_values[to_underlying(property_id)].important == Important::Yes;
+}
+
+bool StyleProperties::is_property_inherited(CSS::PropertyID property_id) const
+{
+    return m_property_values[to_underlying(property_id)].style && m_property_values[to_underlying(property_id)].inherited == Inherited::Yes;
+}
+
+void StyleProperties::set_property(CSS::PropertyID id, NonnullRefPtr<StyleValue const> value, CSS::CSSStyleDeclaration const* source_declaration, Inherited inherited, Important important)
+{
+    m_property_values[to_underlying(id)] = StyleAndSourceDeclaration { move(value), source_declaration, important, inherited };
+}
+
+void StyleProperties::set_animated_property(CSS::PropertyID id, NonnullRefPtr<StyleValue const> value)
+{
+    m_animated_property_values.set(id, move(value));
+}
+
+void StyleProperties::reset_animated_properties()
+{
+    m_animated_property_values.clear();
 }
 
 NonnullRefPtr<StyleValue const> StyleProperties::property(CSS::PropertyID property_id) const
 {
-    auto value = m_property_values[to_underlying(property_id)];
+    if (auto animated_value = m_animated_property_values.get(property_id).value_or(nullptr))
+        return *animated_value;
+
     // By the time we call this method, all properties have values assigned.
-    VERIFY(value.has_value());
-    return value->style;
+    return *m_property_values[to_underlying(property_id)].style;
 }
 
 RefPtr<StyleValue const> StyleProperties::maybe_null_property(CSS::PropertyID property_id) const
 {
-    auto value = m_property_values[to_underlying(property_id)];
-    if (value.has_value())
-        return value->style;
-    return {};
+    if (auto animated_value = m_animated_property_values.get(property_id).value_or(nullptr))
+        return *animated_value;
+    return m_property_values[to_underlying(property_id)].style;
 }
 
 CSS::CSSStyleDeclaration const* StyleProperties::property_source_declaration(CSS::PropertyID property_id) const
 {
-    return m_property_values[to_underlying(property_id)].map([](auto& value) { return value.declaration; }).value_or(nullptr);
+    return m_property_values[to_underlying(property_id)].declaration;
 }
 
 CSS::Size StyleProperties::size_value(CSS::PropertyID id) const
@@ -258,7 +278,7 @@ Optional<int> StyleProperties::z_index() const
     return {};
 }
 
-static float resolve_opacity_value(CSS::StyleValue const& value)
+float StyleProperties::resolve_opacity_value(CSS::StyleValue const& value)
 {
     float unclamped_opacity = 1.0f;
 
@@ -313,6 +333,12 @@ float StyleProperties::stop_opacity() const
 Optional<CSS::FillRule> StyleProperties::fill_rule() const
 {
     auto value = property(CSS::PropertyID::FillRule);
+    return value_id_to_fill_rule(value->to_identifier());
+}
+
+Optional<CSS::ClipRule> StyleProperties::clip_rule() const
+{
+    auto value = property(CSS::PropertyID::ClipRule);
     return value_id_to_fill_rule(value->to_identifier());
 }
 
@@ -493,6 +519,12 @@ static Optional<LengthPercentage> length_percentage_for_style_value(StyleValue c
     return {};
 }
 
+Optional<CSS::TransformBox> StyleProperties::transform_box() const
+{
+    auto value = property(CSS::PropertyID::TransformBox);
+    return value_id_to_transform_box(value->to_identifier());
+}
+
 CSS::TransformOrigin StyleProperties::transform_origin() const
 {
     auto value = property(CSS::PropertyID::TransformOrigin);
@@ -585,15 +617,15 @@ bool StyleProperties::operator==(StyleProperties const& other) const
     for (size_t i = 0; i < m_property_values.size(); ++i) {
         auto const& my_style = m_property_values[i];
         auto const& other_style = other.m_property_values[i];
-        if (!my_style.has_value()) {
-            if (other_style.has_value())
+        if (!my_style.style) {
+            if (other_style.style)
                 return false;
             continue;
         }
-        if (!other_style.has_value())
+        if (!other_style.style)
             return false;
-        auto const& my_value = *my_style->style;
-        auto const& other_value = *other_style->style;
+        auto const& my_value = *my_style.style;
+        auto const& other_value = *other_style.style;
         if (my_value.type() != other_value.type())
             return false;
         if (my_value != other_value)
@@ -1020,10 +1052,24 @@ Optional<CSS::ObjectFit> StyleProperties::object_fit() const
     return value_id_to_object_fit(value->to_identifier());
 }
 
-CSS::PositionStyleValue const& StyleProperties::object_position() const
+CSS::ObjectPosition StyleProperties::object_position() const
 {
     auto value = property(CSS::PropertyID::ObjectPosition);
-    return value->as_position();
+    auto const& position = value->as_position();
+    CSS::ObjectPosition object_position;
+    auto const& edge_x = position.edge_x();
+    auto const& edge_y = position.edge_y();
+    if (edge_x->is_edge()) {
+        auto const& edge = edge_x->as_edge();
+        object_position.edge_x = edge.edge();
+        object_position.offset_x = edge.offset();
+    }
+    if (edge_y->is_edge()) {
+        auto const& edge = edge_y->as_edge();
+        object_position.edge_y = edge.edge();
+        object_position.offset_y = edge.offset();
+    }
+    return object_position;
 }
 
 Optional<CSS::TableLayout> StyleProperties::table_layout() const
@@ -1088,6 +1134,12 @@ QuotesData StyleProperties::quotes() const
     }
 
     return InitialValues::quotes();
+}
+
+Optional<CSS::ScrollbarWidth> StyleProperties::scrollbar_width() const
+{
+    auto value = property(CSS::PropertyID::ScrollbarWidth);
+    return value_id_to_scrollbar_width(value->to_identifier());
 }
 
 }

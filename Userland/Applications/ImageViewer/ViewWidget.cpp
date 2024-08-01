@@ -169,7 +169,7 @@ void ViewWidget::navigate(Directions direction)
     m_current_index = index;
 
     auto value = result.release_value();
-    open_file(value.filename(), value.stream());
+    open_file(MUST(String::from_byte_string(value.filename())), value.stream());
 }
 
 void ViewWidget::doubleclick_event(GUI::MouseEvent&)
@@ -224,7 +224,7 @@ ErrorOr<void> ViewWidget::try_open_file(String const& path, Core::File& file)
     Vector<Animation::Frame> frames;
     // Note: Doing this check only requires reading the header of images
     // (so if the image is not vector graphics it can be still be decoded OOP).
-    if (auto decoder = Gfx::ImageDecoder::try_create_for_raw_bytes(file_data); decoder && decoder->natural_frame_format() == Gfx::NaturalFrameFormat::Vector) {
+    if (auto decoder = TRY(Gfx::ImageDecoder::try_create_for_raw_bytes(file_data)); decoder && decoder->natural_frame_format() == Gfx::NaturalFrameFormat::Vector) {
         // Use in-process decoding for vector graphics.
         is_animated = decoder->is_animated();
         loop_count = decoder->loop_count();
@@ -237,16 +237,15 @@ ErrorOr<void> ViewWidget::try_open_file(String const& path, Core::File& file)
         // Use out-of-process decoding for raster formats.
         auto client = TRY(ImageDecoderClient::Client::try_create());
         auto mime_type = Core::guess_mime_type_based_on_filename(path);
-        auto decoded_image = client->decode_image(file_data, OptionalNone {}, mime_type);
-        if (!decoded_image.has_value()) {
-            return Error::from_string_literal("Failed to decode image");
-        }
-        is_animated = decoded_image->is_animated;
-        loop_count = decoded_image->loop_count;
-        frames.ensure_capacity(decoded_image->frames.size());
-        for (u32 i = 0; i < decoded_image->frames.size(); i++) {
-            auto& frame_data = decoded_image->frames[i];
-            frames.unchecked_append({ BitmapImage::create(frame_data.bitmap), int(frame_data.duration) });
+
+        // FIXME: Refactor file opening to be more async-aware, and don't await this promise
+        auto decoded_image = TRY(client->decode_image(file_data, {}, {}, OptionalNone {}, mime_type)->await());
+        is_animated = decoded_image.is_animated;
+        loop_count = decoded_image.loop_count;
+        frames.ensure_capacity(decoded_image.frames.size());
+        for (u32 i = 0; i < decoded_image.frames.size(); i++) {
+            auto& frame_data = decoded_image.frames[i];
+            frames.unchecked_append({ BitmapImage::create(frame_data.bitmap, decoded_image.scale), int(frame_data.duration) });
         }
     }
 

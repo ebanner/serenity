@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLTableSectionElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/HTMLCollection.h>
@@ -26,7 +27,7 @@ HTMLTableSectionElement::~HTMLTableSectionElement() = default;
 void HTMLTableSectionElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLTableSectionElementPrototype>(realm, "HTMLTableSectionElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLTableSectionElement);
 }
 
 void HTMLTableSectionElement::visit_edges(Cell::Visitor& visitor)
@@ -49,7 +50,7 @@ JS::NonnullGCPtr<DOM::HTMLCollection> HTMLTableSectionElement::rows() const
 }
 
 // https://html.spec.whatwg.org/multipage/tables.html#dom-tbody-insertrow
-WebIDL::ExceptionOr<JS::NonnullGCPtr<HTMLTableRowElement>> HTMLTableSectionElement::insert_row(long index)
+WebIDL::ExceptionOr<JS::NonnullGCPtr<HTMLTableRowElement>> HTMLTableSectionElement::insert_row(WebIDL::Long index)
 {
     auto rows_collection = rows();
     auto rows_collection_size = static_cast<long>(rows_collection->length());
@@ -66,14 +67,14 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<HTMLTableRowElement>> HTMLTableSectionEleme
         TRY(append_child(table_row));
     // 4. Otherwise, insert table row as a child of this element, immediately before the index-th tr element in the rows collection.
     else
-        table_row.insert_before(*this, rows_collection->item(index));
+        insert_before(table_row, rows_collection->item(index));
 
     // 5. Return table row.
     return JS::NonnullGCPtr(table_row);
 }
 
 // https://html.spec.whatwg.org/multipage/tables.html#dom-tbody-deleterow
-WebIDL::ExceptionOr<void> HTMLTableSectionElement::delete_row(long index)
+WebIDL::ExceptionOr<void> HTMLTableSectionElement::delete_row(WebIDL::Long index)
 {
     auto rows_collection = rows();
     auto rows_collection_size = static_cast<long>(rows_collection->length());

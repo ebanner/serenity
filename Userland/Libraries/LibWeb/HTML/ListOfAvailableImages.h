@@ -7,8 +7,8 @@
 #pragma once
 
 #include <AK/HashMap.h>
-#include <AK/URL.h>
 #include <LibJS/Heap/Cell.h>
+#include <LibURL/URL.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
 #include <LibWeb/HTML/Origin.h>
@@ -17,12 +17,12 @@ namespace Web::HTML {
 
 // https://html.spec.whatwg.org/multipage/images.html#list-of-available-images
 class ListOfAvailableImages : public JS::Cell {
-    JS_CELL(ListOfAvailableImages, Cell);
+    JS_CELL(ListOfAvailableImages, JS::Cell);
     JS_DECLARE_ALLOCATOR(ListOfAvailableImages);
 
 public:
     struct Key {
-        AK::URL url;
+        URL::URL url;
         HTML::CORSSettingAttribute mode;
         Optional<HTML::Origin> origin;
 

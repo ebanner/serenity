@@ -373,11 +373,11 @@ typedef struct {
 /* Extract symbol info - st_info */
 #define ELF32_ST_BIND(x) ((x) >> 4)
 #define ELF32_ST_TYPE(x) (((unsigned int)x) & 0xf)
-#define ELF32_ST_INFO(b, t) (((b) << 4) + ((t)&0xf))
+#define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))
 
 #define ELF64_ST_BIND(x) ((x) >> 4)
 #define ELF64_ST_TYPE(x) (((unsigned int)x) & 0xf)
-#define ELF64_ST_INFO(b, t) (((b) << 4) + ((t)&0xf))
+#define ELF64_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))
 
 /* Symbol Binding - ELF32_ST_BIND - st_info */
 #define STB_LOCAL 0   /* Local symbol */
@@ -399,7 +399,7 @@ typedef struct {
 #define STT_HIPROC 15 /*  specific symbol types */
 
 /* Extract symbol visibility - st_other */
-#define ELF_ST_VISIBILITY(v) ((v)&0x3)
+#define ELF_ST_VISIBILITY(v) ((v) & 0x3)
 #define ELF32_ST_VISIBILITY ELF_ST_VISIBILITY
 #define ELF64_ST_VISIBILITY ELF_ST_VISIBILITY
 
@@ -438,7 +438,7 @@ typedef struct {
 } Elf64_Rela;
 
 #define ELF64_R_SYM(info) ((info) >> 32)
-#define ELF64_R_TYPE(info) ((info)&0xFFFFFFFF)
+#define ELF64_R_TYPE(info) ((info) & 0xFFFFFFFF)
 #define ELF64_R_INFO(s, t) (((s) << 32) + (uint32_t)(t))
 
 #if defined(__mips64__) && defined(__MIPSEL__)
@@ -451,7 +451,7 @@ typedef struct {
 #    undef ELF64_R_TYPE
 #    undef ELF64_R_INFO
 #    define ELF64_R_TYPE(info) ((uint64_t)swap32((info) >> 32))
-#    define ELF64_R_SYM(info) ((info)&0xFFFFFFFF)
+#    define ELF64_R_SYM(info) ((info) & 0xFFFFFFFF)
 #    define ELF64_R_INFO(s, t) (((uint64_t)swap32(t) << 32) + (uint32_t)(s))
 #endif /* __mips64__ && __MIPSEL__ */
 
@@ -882,3 +882,27 @@ struct elf_args {
     R(R_AARCH64_TLS_TPREL)                    \
     R(R_AARCH64_TLSDESC)                      \
     R(R_AARCH64_IRELATIVE)
+
+/* https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/v1.0/riscv-elf.adoc#relocations */
+#define R_RISCV_NONE 0
+#define R_RISCV_64 2
+#define R_RISCV_RELATIVE 3
+#define R_RISCV_COPY 4
+#define R_RISCV_JUMP_SLOT 5
+#define R_RISCV_TLS_DTPMOD64 7
+#define R_RISCV_TLS_DTPREL64 9
+#define R_RISCV_TLS_TPREL64 11
+#define R_RISCV_TLSDESC 12
+#define R_RISCV_IRELATIVE 58
+
+#define __ENUMERATE_RISCV_DYNAMIC_RELOCS(R) \
+    R(R_RISCV_NONE)                         \
+    R(R_RISCV_64)                           \
+    R(R_RISCV_RELATIVE)                     \
+    R(R_RISCV_COPY)                         \
+    R(R_RISCV_JUMP_SLOT)                    \
+    R(R_RISCV_TLS_DTPMOD64)                 \
+    R(R_RISCV_TLS_DTPREL64)                 \
+    R(R_RISCV_TLS_TPREL64)                  \
+    R(R_RISCV_TLSDESC)                      \
+    R(R_RISCV_IRELATIVE)

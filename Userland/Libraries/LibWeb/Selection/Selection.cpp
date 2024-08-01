@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/SelectionPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/Selection/Selection.h>
@@ -29,7 +30,7 @@ Selection::~Selection() = default;
 void Selection::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SelectionPrototype>(realm, "Selection"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Selection);
 }
 
 // https://w3c.github.io/selection-api/#dfn-empty

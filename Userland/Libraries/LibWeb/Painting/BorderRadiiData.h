@@ -17,11 +17,11 @@ struct BorderRadiusData {
     CSSPixels horizontal_radius { 0 };
     CSSPixels vertical_radius { 0 };
 
-    Gfx::AntiAliasingPainter::CornerRadius as_corner(PaintContext& context) const;
+    Gfx::CornerRadius as_corner(PaintContext const& context) const;
 
     inline operator bool() const
     {
-        return horizontal_radius > 0 || vertical_radius > 0;
+        return horizontal_radius > 0 && vertical_radius > 0;
     }
 
     inline void shrink(CSSPixels horizontal, CSSPixels vertical)
@@ -31,9 +31,15 @@ struct BorderRadiusData {
         if (vertical_radius != 0)
             vertical_radius = max(CSSPixels(0), vertical_radius - vertical);
     }
+
+    inline void union_max_radii(BorderRadiusData const& other)
+    {
+        horizontal_radius = max(horizontal_radius, other.horizontal_radius);
+        vertical_radius = max(vertical_radius, other.vertical_radius);
+    }
 };
 
-using CornerRadius = Gfx::AntiAliasingPainter::CornerRadius;
+using CornerRadius = Gfx::CornerRadius;
 
 struct CornerRadii {
     CornerRadius top_left;
@@ -58,6 +64,14 @@ struct BorderRadiiData {
         return top_left || top_right || bottom_right || bottom_left;
     }
 
+    inline void union_max_radii(BorderRadiiData const& other)
+    {
+        top_left.union_max_radii(other.top_left);
+        top_right.union_max_radii(other.top_right);
+        bottom_right.union_max_radii(other.bottom_right);
+        bottom_left.union_max_radii(other.bottom_left);
+    }
+
     inline void shrink(CSSPixels top, CSSPixels right, CSSPixels bottom, CSSPixels left)
     {
         top_left.shrink(left, top);
@@ -71,7 +85,7 @@ struct BorderRadiiData {
         shrink(-top, -right, -bottom, -left);
     }
 
-    inline CornerRadii as_corners(PaintContext& context) const
+    inline CornerRadii as_corners(PaintContext const& context) const
     {
         return CornerRadii {
             top_left.as_corner(context),

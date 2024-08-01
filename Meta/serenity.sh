@@ -48,19 +48,17 @@ Usage: $NAME COMMAND [TARGET] [TOOLCHAIN] [ARGS...]
   Examples:
     $NAME run x86_64 GNU smp=on
         Runs the image in QEMU passing "smp=on" to the kernel command line
-    $NAME run x86_64 GNU 'init=/bin/UserspaceEmulator init_args=/bin/SystemServer'
-        Runs the image in QEMU, and run the entire system through UserspaceEmulator (not fully supported yet)
     $NAME run
         Runs the image for the default TARGET x86_64 in QEMU
     $NAME run lagom js -A
         Runs the Lagom-built js(1) REPL
     $NAME test lagom
         Runs the unit tests on the build host
-    $NAME kaddr2line x86_64 0x12345678
+    $NAME kaddr2line x86_64 GNU 0x12345678
         Resolves the address 0x12345678 in the Kernel binary
     $NAME addr2line x86_64 WindowServer 0x12345678
         Resolves the address 0x12345678 in the WindowServer binary
-    $NAME gdb x86_64 smp=on -ex 'hb *init'
+    $NAME gdb x86_64 GNU smp=on -ex 'hb *init'
         Runs the image for the TARGET x86_64 in qemu and attaches a gdb session
         setting a breakpoint at the init() function in the Kernel.
 EOF
@@ -288,9 +286,9 @@ delete_toolchain() {
 }
 
 kill_tmux_session() {
-    local TMUX_SESSION
-    TMUX_SESSION="$(tmux display-message -p '#S')"
-    [ -z "$TMUX_SESSION" ] || tmux kill-session -t "$TMUX_SESSION"
+    if [ -n "$TMUX_SESSION" ]; then
+        tmux has-session -t "$TMUX_SESSION" >/dev/null 2>&1 && tmux kill-session -t "$TMUX_SESSION"
+    fi
 }
 
 set_tmux_title() {
@@ -417,7 +415,9 @@ if [[ "$CMD" =~ ^(build|install|image|copy-src|run|gdb|test|rebuild|recreate|kad
                 build_target
                 build_target install
                 build_image
-                tmux new-session "$ARG0" __tmux_cmd "$TARGET" "$TOOLCHAIN_TYPE" run "${CMD_ARGS[@]}" \; set-option -t 0 mouse on \; split-window "$ARG0" __tmux_cmd "$TARGET" "$TOOLCHAIN_TYPE" gdb "${CMD_ARGS[@]}" \;
+
+                TMUX_SESSION="tmux-serenity-gdb-$(date +%s)"
+                tmux new-session -e "TMUX_SESSION=$TMUX_SESSION" -s "$TMUX_SESSION" "$ARG0" __tmux_cmd "$TARGET" "$TOOLCHAIN_TYPE" run "${CMD_ARGS[@]}" \; set-option -t 0 mouse on \; split-window -e "TMUX_SESSION=$TMUX_SESSION" "$ARG0" __tmux_cmd "$TARGET" "$TOOLCHAIN_TYPE" gdb "${CMD_ARGS[@]}" \;
             fi
             ;;
         test)

@@ -16,6 +16,8 @@
 
 namespace Web::Layout {
 
+JS_DEFINE_ALLOCATOR(TextNode);
+
 TextNode::TextNode(DOM::Document& document, DOM::Text& text)
     : Node(document, &text)
 {
@@ -466,7 +468,7 @@ Optional<TextNode::Chunk> TextNode::ChunkIterator::try_commit_chunk(Utf8View::It
 
 JS::GCPtr<Painting::Paintable> TextNode::create_paintable() const
 {
-    return Painting::TextPaintable::create(*this);
+    return Painting::TextPaintable::create(*this, text_for_rendering());
 }
 
 }

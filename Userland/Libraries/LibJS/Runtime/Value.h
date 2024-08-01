@@ -131,6 +131,8 @@ public:
         Number,
     };
 
+    [[nodiscard]] u16 tag() const { return m_value.tag; }
+
     bool is_empty() const { return m_value.tag == EMPTY_TAG; }
     bool is_undefined() const { return m_value.tag == UNDEFINED_TAG; }
     bool is_null() const { return m_value.tag == NULL_TAG; }
@@ -602,6 +604,9 @@ public:
 
     Optional() = default;
 
+    template<SameAs<OptionalNone> V>
+    Optional(V) { }
+
     Optional(Optional<JS::Value> const& other)
     {
         if (other.has_value())
@@ -614,10 +619,18 @@ public:
     }
 
     template<typename U = JS::Value>
+    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
     explicit(!IsConvertible<U&&, JS::Value>) Optional(U&& value)
     requires(!IsSame<RemoveCVReference<U>, Optional<JS::Value>> && IsConstructible<JS::Value, U &&>)
         : m_value(forward<U>(value))
     {
+    }
+
+    template<SameAs<OptionalNone> V>
+    Optional& operator=(V)
+    {
+        clear();
+        return *this;
     }
 
     Optional& operator=(Optional const& other)
@@ -722,6 +735,7 @@ struct Formatter<JS::Value> : Formatter<StringView> {
 template<>
 struct Traits<JS::Value> : DefaultTraits<JS::Value> {
     static unsigned hash(JS::Value value) { return Traits<u64>::hash(value.encoded()); }
+    static constexpr bool is_trivial() { return true; }
 };
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2024, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2022-2023, San Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -23,6 +23,7 @@
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/DOM/NamedNodeMap.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -45,6 +46,7 @@
 #include <LibWeb/HTML/HTMLOptGroupElement.h>
 #include <LibWeb/HTML/HTMLOptionElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
+#include <LibWeb/HTML/HTMLSlotElement.h>
 #include <LibWeb/HTML/HTMLStyleElement.h>
 #include <LibWeb/HTML/HTMLTableElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
@@ -63,6 +65,7 @@
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/InlinePaintable.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -81,7 +84,7 @@ Element::~Element() = default;
 void Element::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::ElementPrototype>(realm, "Element"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Element);
 
     m_attributes = NamedNodeMap::create(*this);
 }
@@ -90,6 +93,7 @@ void Element::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     SlottableMixin::visit_edges(visitor);
+    Animatable::visit_edges(visitor);
 
     visitor.visit(m_attributes);
     visitor.visit(m_inline_style);
@@ -97,8 +101,7 @@ void Element::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_shadow_root);
     visitor.visit(m_custom_element_definition);
     if (m_pseudo_element_nodes) {
-        for (auto& pseudo_element_layout_node : *m_pseudo_element_nodes)
-            visitor.visit(pseudo_element_layout_node);
+        visitor.visit(m_pseudo_element_nodes->span());
     }
     if (m_registered_intersection_observers) {
         for (auto& registered_intersection_observers : *m_registered_intersection_observers)
@@ -166,13 +169,11 @@ JS::GCPtr<Attr> Element::get_attribute_node_ns(Optional<FlyString> const& namesp
 WebIDL::ExceptionOr<void> Element::set_attribute(FlyString const& name, String const& value)
 {
     // 1. If qualifiedName does not match the Name production in XML, then throw an "InvalidCharacterError" DOMException.
-    // FIXME: Proper name validation
-    if (name.is_empty())
-        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty"_fly_string);
+    if (!Document::is_valid_name(name.to_string()))
+        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty or contain invalid characters"_fly_string);
 
     // 2. If this is in the HTML namespace and its node document is an HTML document, then set qualifiedName to qualifiedName in ASCII lowercase.
-    // FIXME: Handle the second condition, assume it is an HTML document for now.
-    bool insert_as_lowercase = namespace_uri() == Namespace::HTML;
+    bool insert_as_lowercase = namespace_uri() == Namespace::HTML && document().document_type() == Document::Type::HTML;
 
     // 3. Let attribute be the first attribute in this’s attribute list whose qualified name is qualifiedName, and null otherwise.
     auto* attribute = m_attributes->get_attribute(name);
@@ -248,6 +249,12 @@ WebIDL::ExceptionOr<void> Element::set_attribute_ns(Optional<FlyString> const& n
 }
 
 // https://dom.spec.whatwg.org/#concept-element-attributes-append
+void Element::append_attribute(FlyString const& name, String const& value)
+{
+    m_attributes->append_attribute(Attr::create(document(), name, value));
+}
+
+// https://dom.spec.whatwg.org/#concept-element-attributes-append
 void Element::append_attribute(Attr& attribute)
 {
     m_attributes->append_attribute(attribute);
@@ -303,6 +310,12 @@ void Element::remove_attribute_ns(Optional<FlyString> const& namespace_, FlyStri
     m_attributes->remove_attribute_ns(namespace_, name);
 }
 
+// https://dom.spec.whatwg.org/#dom-element-removeattributenode
+WebIDL::ExceptionOr<JS::NonnullGCPtr<Attr>> Element::remove_attribute_node(JS::NonnullGCPtr<Attr> attr)
+{
+    return m_attributes->remove_attribute_node(attr);
+}
+
 // https://dom.spec.whatwg.org/#dom-element-hasattribute
 bool Element::has_attribute(FlyString const& name) const
 {
@@ -329,8 +342,7 @@ WebIDL::ExceptionOr<bool> Element::toggle_attribute(FlyString const& name, Optio
         return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty"_fly_string);
 
     // 2. If this is in the HTML namespace and its node document is an HTML document, then set qualifiedName to qualifiedName in ASCII lowercase.
-    // FIXME: Handle the second condition, assume it is an HTML document for now.
-    bool insert_as_lowercase = namespace_uri() == Namespace::HTML;
+    bool insert_as_lowercase = namespace_uri() == Namespace::HTML && document().document_type() == Document::Type::HTML;
 
     // 3. Let attribute be the first attribute in this’s attribute list whose qualified name is qualifiedName, and null otherwise.
     auto* attribute = m_attributes->get_attribute(name);
@@ -372,19 +384,6 @@ Vector<String> Element::get_attribute_names() const
     return names;
 }
 
-bool Element::has_class(FlyString const& class_name, CaseSensitivity case_sensitivity) const
-{
-    if (case_sensitivity == CaseSensitivity::CaseSensitive) {
-        return any_of(m_classes, [&](auto& it) {
-            return it == class_name;
-        });
-    } else {
-        return any_of(m_classes, [&](auto& it) {
-            return it.equals_ignoring_ascii_case(class_name);
-        });
-    }
-}
-
 JS::GCPtr<Layout::Node> Element::create_layout_node(NonnullRefPtr<CSS::StyleProperties> style)
 {
     if (local_name() == "noscript" && document().is_scripting_enabled())
@@ -415,7 +414,7 @@ JS::GCPtr<Layout::Node> Element::create_layout_node_for_display_type(DOM::Docume
         // MathML elements with a computed display value equal to block math or inline math control box generation
         // and layout according to their tag name, as described in the relevant sections.
         // FIXME: Figure out what kind of node we should make for them. For now, we'll stick with a generic Box.
-        return document.heap().allocate_without_realm<Layout::Box>(document, element, move(style));
+        return document.heap().allocate_without_realm<Layout::BlockContainer>(document, element, move(style));
     }
 
     if (display.is_inline_outside()) {
@@ -441,11 +440,6 @@ JS::GCPtr<Layout::Node> Element::create_layout_node_for_display_type(DOM::Docume
     return document.heap().allocate_without_realm<Layout::InlineNode>(document, element, move(style));
 }
 
-CSS::CSSStyleDeclaration const* Element::inline_style() const
-{
-    return m_inline_style.ptr();
-}
-
 void Element::run_attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
     attribute_change_steps(local_name, old_value, value, namespace_);
@@ -453,6 +447,8 @@ void Element::run_attribute_change_steps(FlyString const& local_name, Optional<S
     // AD-HOC: Run our own internal attribute change handler.
     attribute_changed(local_name, value);
     invalidate_style_after_attribute_change(local_name);
+
+    document().bump_dom_tree_version();
 }
 
 void Element::attribute_changed(FlyString const& name, Optional<String> const& value)
@@ -464,11 +460,15 @@ void Element::attribute_changed(FlyString const& name, Optional<String> const& v
             m_id = {};
         else
             m_id = value_or_empty;
+
+        document().element_id_changed({}, *this);
     } else if (name == HTML::AttributeNames::name) {
         if (!value.has_value())
             m_name = {};
         else
             m_name = value_or_empty;
+
+        document().element_name_changed({}, *this);
     } else if (name == HTML::AttributeNames::class_) {
         auto new_classes = value_or_empty.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
         m_classes.clear();
@@ -480,7 +480,7 @@ void Element::attribute_changed(FlyString const& name, Optional<String> const& v
             m_class_list->associated_attribute_changed(value_or_empty);
     } else if (name == HTML::AttributeNames::style) {
         if (!value.has_value()) {
-            if (!m_inline_style) {
+            if (m_inline_style) {
                 m_inline_style = nullptr;
                 set_needs_style_update(true);
             }
@@ -504,71 +504,31 @@ void Element::attribute_changed(FlyString const& name, Optional<String> const& v
     }
 }
 
-static Element::RequiredInvalidationAfterStyleChange compute_required_invalidation(CSS::StyleProperties const& old_style, CSS::StyleProperties const& new_style)
+static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation(CSS::StyleProperties const& old_style, CSS::StyleProperties const& new_style)
 {
-    Element::RequiredInvalidationAfterStyleChange invalidation;
+    CSS::RequiredInvalidationAfterStyleChange invalidation;
 
     if (!old_style.computed_font_list().equals(new_style.computed_font_list()))
         invalidation.relayout = true;
 
     for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
         auto property_id = static_cast<CSS::PropertyID>(i);
-        auto const& old_value = old_style.properties()[i];
-        auto const& new_value = new_style.properties()[i];
-        if (!old_value.has_value() && !new_value.has_value())
+        auto old_value = old_style.maybe_null_property(property_id);
+        auto new_value = new_style.maybe_null_property(property_id);
+        if (!old_value && !new_value)
             continue;
 
-        bool const property_value_changed = (!old_value.has_value() || !new_value.has_value()) || *old_value->style != *new_value->style;
-        if (!property_value_changed)
-            continue;
-
-        // NOTE: If the computed CSS display property changes, we have to rebuild the entire layout tree.
-        //       In the future, we should figure out ways to rebuild a smaller part of the tree.
-        if (property_id == CSS::PropertyID::Display) {
-            return Element::RequiredInvalidationAfterStyleChange::full();
-        }
-
-        // NOTE: If one of the overflow properties change, we rebuild the entire layout tree.
-        //       This ensures that overflow propagation from root/body to viewport happens correctly.
-        //       In the future, we can make this invalidation narrower.
-        if (property_id == CSS::PropertyID::OverflowX || property_id == CSS::PropertyID::OverflowY) {
-            return Element::RequiredInvalidationAfterStyleChange::full();
-        }
-
-        // OPTIMIZATION: Special handling for CSS `visibility`:
-        if (property_id == CSS::PropertyID::Visibility) {
-            // We don't need to relayout if the visibility changes from visible to hidden or vice versa. Only collapse requires relayout.
-            if ((old_value.has_value() && old_value->style->to_identifier() == CSS::ValueID::Collapse) != (new_value.has_value() && new_value->style->to_identifier() == CSS::ValueID::Collapse))
-                invalidation.relayout = true;
-            // Of course, we still have to repaint on any visibility change.
-            invalidation.repaint = true;
-        } else if (CSS::property_affects_layout(property_id)) {
-            invalidation.relayout = true;
-        }
-        if (property_id == CSS::PropertyID::Opacity) {
-            // OPTIMIZATION: An element creates a stacking context when its opacity changes from 1 to less than 1
-            //               and stops to create one when opacity returns to 1. So stacking context tree rebuild is
-            //               not required for opacity changes within the range below 1.
-            auto old_value_opacity = old_style.opacity();
-            auto new_value_opacity = new_style.opacity();
-            if (old_value_opacity != new_value_opacity && (old_value_opacity == 1 || new_value_opacity == 1)) {
-                invalidation.rebuild_stacking_context_tree = true;
-            }
-        } else if (CSS::property_affects_stacking_context(property_id)) {
-            invalidation.rebuild_stacking_context_tree = true;
-        }
-        invalidation.repaint = true;
+        invalidation |= CSS::compute_property_invalidation(property_id, old_value, new_value);
     }
     return invalidation;
 }
 
-Element::RequiredInvalidationAfterStyleChange Element::recompute_style()
+CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
 {
     set_needs_style_update(false);
     VERIFY(parent());
 
-    // FIXME propagate errors
-    auto new_computed_css_values = MUST(document().style_computer().compute_style(*this));
+    auto new_computed_css_values = document().style_computer().compute_style(*this);
 
     // Tables must not inherit -libweb-* values for text-align.
     // FIXME: Find the spec for this.
@@ -578,17 +538,20 @@ Element::RequiredInvalidationAfterStyleChange Element::recompute_style()
             new_computed_css_values->set_property(CSS::PropertyID::TextAlign, CSS::IdentifierStyleValue::create(CSS::ValueID::Start));
     }
 
-    RequiredInvalidationAfterStyleChange invalidation;
+    CSS::RequiredInvalidationAfterStyleChange invalidation;
     if (m_computed_css_values)
         invalidation = compute_required_invalidation(*m_computed_css_values, *new_computed_css_values);
     else
-        invalidation = RequiredInvalidationAfterStyleChange::full();
+        invalidation = CSS::RequiredInvalidationAfterStyleChange::full();
 
     if (invalidation.is_none())
         return invalidation;
 
     m_computed_css_values = move(new_computed_css_values);
     computed_css_values_changed();
+
+    if (invalidation.repaint)
+        document().set_needs_to_resolve_paint_only_properties();
 
     if (!invalidation.rebuild_layout_tree && layout_node()) {
         // If we're keeping the layout tree, we can just apply the new style to the existing layout tree.
@@ -616,6 +579,13 @@ NonnullRefPtr<CSS::StyleProperties> Element::resolved_css_values()
     return properties;
 }
 
+void Element::reset_animated_css_properties()
+{
+    if (!m_computed_css_values)
+        return;
+    m_computed_css_values->reset_animated_properties();
+}
+
 DOMTokenList* Element::class_list()
 {
     if (!m_class_list)
@@ -623,25 +593,33 @@ DOMTokenList* Element::class_list()
     return m_class_list;
 }
 
-// https://dom.spec.whatwg.org/#dom-element-attachshadow
-WebIDL::ExceptionOr<JS::NonnullGCPtr<ShadowRoot>> Element::attach_shadow(ShadowRootInit init)
+// https://dom.spec.whatwg.org/#valid-shadow-host-name
+static bool is_valid_shadow_host_name(FlyString const& name)
 {
-    // 1. If this’s namespace is not the HTML namespace, then throw a "NotSupportedError" DOMException.
+    // A valid shadow host name is:
+    // - a valid custom element name
+    // - "article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", or "span"
+    if (!HTML::is_valid_custom_element_name(name)
+        && !name.is_one_of("article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span")) {
+        return false;
+    }
+    return true;
+}
+
+// https://dom.spec.whatwg.org/#concept-attach-a-shadow-root
+WebIDL::ExceptionOr<void> Element::attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment)
+{
+    // 1. If element’s namespace is not the HTML namespace, then throw a "NotSupportedError" DOMException.
     if (namespace_uri() != Namespace::HTML)
         return WebIDL::NotSupportedError::create(realm(), "Element's namespace is not the HTML namespace"_fly_string);
 
-    // 2. If this’s local name is not one of the following:
-    //    - a valid custom element name
-    //    - "article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", or "span"
-    if (!HTML::is_valid_custom_element_name(local_name())
-        && !local_name().is_one_of("article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span")) {
-        // then throw a "NotSupportedError" DOMException.
-        return WebIDL::NotSupportedError::create(realm(), MUST(String::formatted("Element '{}' cannot be a shadow host", local_name())));
-    }
+    // 2. If element’s local name is not a valid shadow host name, then throw a "NotSupportedError" DOMException.
+    if (!is_valid_shadow_host_name(local_name()))
+        return WebIDL::NotSupportedError::create(realm(), "Element's local name is not a valid shadow host name"_fly_string);
 
-    // 3. If this’s local name is a valid custom element name, or this’s is value is not null, then:
+    // 3. If element’s local name is a valid custom element name, or element’s is value is not null, then:
     if (HTML::is_valid_custom_element_name(local_name()) || m_is_value.has_value()) {
-        // 1. Let definition be the result of looking up a custom element definition given this’s node document, its namespace, its local name, and its is value.
+        // 1. Let definition be the result of looking up a custom element definition given element’s node document, its namespace, its local name, and its is value.
         auto definition = document().lookup_custom_element_definition(namespace_uri(), local_name(), m_is_value);
 
         // 2. If definition is not null and definition’s disable shadow is true, then throw a "NotSupportedError" DOMException.
@@ -649,32 +627,69 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<ShadowRoot>> Element::attach_shadow(ShadowR
             return WebIDL::NotSupportedError::create(realm(), "Cannot attach a shadow root to a custom element that has disabled shadow roots"_fly_string);
     }
 
-    // 4. If this is a shadow host, then throw an "NotSupportedError" DOMException.
-    if (is_shadow_host())
-        return WebIDL::NotSupportedError::create(realm(), "Element already is a shadow host"_fly_string);
+    // 4. If element is a shadow host, then:
+    if (is_shadow_host()) {
+        // 1. Let currentShadowRoot be element’s shadow root.
+        auto current_shadow_root = shadow_root();
 
-    // 5. Let shadow be a new shadow root whose node document is this’s node document, host is this, and mode is init["mode"].
-    auto shadow = heap().allocate<ShadowRoot>(realm(), document(), *this, init.mode);
+        // 2. If any of the following are true:
+        // - currentShadowRoot’s declarative is false; or
+        // - currentShadowRoot’s mode is not mode,
+        // then throw a "NotSupportedError" DOMException.
+        if (!current_shadow_root->declarative() || current_shadow_root->mode() != mode) {
+            return WebIDL::NotSupportedError::create(realm(), "Element already is a shadow host"_fly_string);
+        }
 
-    // 6. Set shadow’s delegates focus to init["delegatesFocus"].
-    shadow->set_delegates_focus(init.delegates_focus);
+        // 3. Otherwise:
+        //    1. Remove all of currentShadowRoot’s children, in tree order.
+        current_shadow_root->remove_all_children();
 
-    // 7. If this’s custom element state is "precustomized" or "custom", then set shadow’s available to element internals to true.
+        //    2. Set currentShadowRoot’s declarative to false.
+        current_shadow_root->set_declarative(false);
+
+        //    3. Return.
+        return {};
+    }
+
+    // 5. Let shadow be a new shadow root whose node document is element’s node document, host is this, and mode is mode.
+    auto shadow = heap().allocate<ShadowRoot>(realm(), document(), *this, mode);
+
+    // 6. Set shadow’s delegates focus to delegatesFocus".
+    shadow->set_delegates_focus(delegates_focus);
+
+    // 7. If element’s custom element state is "precustomized" or "custom", then set shadow’s available to element internals to true.
     if (m_custom_element_state == CustomElementState::Precustomized || m_custom_element_state == CustomElementState::Custom)
         shadow->set_available_to_element_internals(true);
 
-    // 8. Set shadow’s slot assignment to init["slotAssignment"].
-    shadow->set_slot_assignment(init.slot_assignment);
+    // 8. Set shadow’s slot assignment to slotAssignment.
+    shadow->set_slot_assignment(slot_assignment);
 
-    // 9. Set this’s shadow root to shadow.
+    // 9. Set shadow’s declarative to false.
+    shadow->set_declarative(false);
+
+    // 10. Set shadow’s clonable to clonable.
+    shadow->set_clonable(clonable);
+
+    // 11. Set shadow’s serializable to serializable.
+    shadow->set_serializable(serializable);
+
+    // 12. Set element’s shadow root to shadow.
     set_shadow_root(shadow);
+    return {};
+}
 
-    // 10. Return shadow.
-    return shadow;
+// https://dom.spec.whatwg.org/#dom-element-attachshadow
+WebIDL::ExceptionOr<JS::NonnullGCPtr<ShadowRoot>> Element::attach_shadow(ShadowRootInit init)
+{
+    // 1. Run attach a shadow root with this, init["mode"], init["clonable"], init["serializable"], init["delegatesFocus"], and init["slotAssignment"].
+    TRY(attach_a_shadow_root(init.mode, init.clonable, init.serializable, init.delegates_focus, init.slot_assignment));
+
+    // 2. Return this’s shadow root.
+    return JS::NonnullGCPtr { *shadow_root() };
 }
 
 // https://dom.spec.whatwg.org/#dom-element-shadowroot
-JS::GCPtr<ShadowRoot> Element::shadow_root() const
+JS::GCPtr<ShadowRoot> Element::shadow_root_for_bindings() const
 {
     // 1. Let shadow be this’s shadow root.
     auto shadow = m_shadow_root;
@@ -718,11 +733,11 @@ WebIDL::ExceptionOr<DOM::Element const*> Element::closest(StringView selectors) 
 
     auto matches_selectors = [this](CSS::SelectorList const& selector_list, Element const* element) {
         // 4. For each element in elements, if match a selector against an element, using s, element, and scoping root this, returns success, return element.
-        for (auto& selector : selector_list) {
-            if (!SelectorEngine::matches(selector, {}, *element, {}, this))
-                return false;
+        for (auto const& selector : selector_list) {
+            if (SelectorEngine::matches(selector, {}, *element, {}, this))
+                return true;
         }
-        return true;
+        return false;
     };
 
     auto const selector_list = maybe_selectors.release_value();
@@ -769,7 +784,8 @@ bool Element::is_target() const
 // https://dom.spec.whatwg.org/#document-element
 bool Element::is_document_element() const
 {
-    return document().document_element() == this;
+    // The document element of a document is the element whose parent is that document, if it exists; otherwise null.
+    return parent() == &document();
 }
 
 JS::NonnullGCPtr<HTMLCollection> Element::get_elements_by_class_name(StringView class_names)
@@ -824,9 +840,9 @@ void Element::make_html_uppercased_qualified_name()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#queue-an-element-task
-int Element::queue_an_element_task(HTML::Task::Source source, JS::SafeFunction<void()> steps)
+int Element::queue_an_element_task(HTML::Task::Source source, Function<void()> steps)
 {
-    auto task = HTML::Task::create(source, &document(), move(steps));
+    auto task = HTML::Task::create(vm(), source, &document(), JS::create_heap_function(heap(), move(steps)));
     auto id = task->id();
 
     HTML::main_thread_event_loop().task_queue().add(move(task));
@@ -849,30 +865,36 @@ bool Element::serializes_as_void() const
 // https://drafts.csswg.org/cssom-view/#dom-element-getboundingclientrect
 JS::NonnullGCPtr<Geometry::DOMRect> Element::get_bounding_client_rect() const
 {
-    // // NOTE: Ensure that layout is up-to-date before looking at metrics.
-    const_cast<Document&>(document()).update_layout();
-    VERIFY(document().navigable());
-    auto viewport_offset = document().navigable()->viewport_scroll_offset();
+    // 1. Let list be the result of invoking getClientRects() on element.
+    auto list = get_client_rects();
 
-    if (auto const* paintable_box = this->paintable_box()) {
-        auto absolute_rect = paintable_box->absolute_border_box_rect();
-        absolute_rect.translate_by(-viewport_offset.x(), -viewport_offset.y());
-        return Geometry::DOMRect::create(realm(), absolute_rect.to_type<float>());
+    // 2. If the list is empty return a DOMRect object whose x, y, width and height members are zero.
+    if (list->length() == 0)
+        return Geometry::DOMRect::construct_impl(realm(), 0, 0, 0, 0).release_value_but_fixme_should_propagate_errors();
+
+    // 3. If all rectangles in list have zero width or height, return the first rectangle in list.
+    auto all_rectangle_has_zero_width_or_height = true;
+    for (auto i = 0u; i < list->length(); ++i) {
+        auto const& rect = list->item(i);
+        if (rect->width() != 0 && rect->height() != 0) {
+            all_rectangle_has_zero_width_or_height = false;
+            break;
+        }
     }
+    if (all_rectangle_has_zero_width_or_height)
+        return JS::NonnullGCPtr { *const_cast<Geometry::DOMRect*>(list->item(0)) };
 
-    auto const* paintable = this->paintable();
-    if (paintable && is<Painting::InlinePaintable>(*paintable)) {
-        auto const& inline_paintable = static_cast<Painting::InlinePaintable const&>(*paintable);
-        auto absolute_rect = inline_paintable.bounding_rect();
-        absolute_rect.translate_by(-viewport_offset.x(), -viewport_offset.y());
-        return Geometry::DOMRect::create(realm(), absolute_rect.to_type<float>());
+    // 4. Otherwise, return a DOMRect object describing the smallest rectangle that includes all of the rectangles in
+    //    list of which the height or width is not zero.
+    auto const* first_rect = list->item(0);
+    auto bounding_rect = Gfx::Rect { first_rect->x(), first_rect->y(), first_rect->width(), first_rect->height() };
+    for (auto i = 1u; i < list->length(); ++i) {
+        auto const& rect = list->item(i);
+        if (rect->width() == 0 || rect->height() == 0)
+            continue;
+        bounding_rect = bounding_rect.united({ rect->x(), rect->y(), rect->width(), rect->height() });
     }
-
-    if (paintable) {
-        dbgln("FIXME: Failed to get bounding client rect for element ({})", debug_description());
-    }
-
-    return Geometry::DOMRect::construct_impl(realm(), 0, 0, 0, 0).release_value_but_fixme_should_propagate_errors();
+    return Geometry::DOMRect::create(realm(), bounding_rect.to_type<float>());
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-getclientrects
@@ -883,22 +905,58 @@ JS::NonnullGCPtr<Geometry::DOMRectList> Element::get_client_rects() const
     // NOTE: Ensure that layout is up-to-date before looking at metrics.
     const_cast<Document&>(document()).update_layout();
 
-    // 1. If the element on which it was invoked does not have an associated layout box return an empty DOMRectList object and stop this algorithm.
-    if (!layout_node() || !layout_node()->is_box())
+    // 1. If the element on which it was invoked does not have an associated layout box return an empty DOMRectList
+    //    object and stop this algorithm.
+    if (!layout_node())
         return Geometry::DOMRectList::create(realm(), move(rects));
 
-    // FIXME: 2. If the element has an associated SVG layout box return a DOMRectList object containing a single DOMRect object that describes
-    // the bounding box of the element as defined by the SVG specification, applying the transforms that apply to the element and its ancestors.
+    // FIXME: 2. If the element has an associated SVG layout box return a DOMRectList object containing a single
+    //          DOMRect object that describes the bounding box of the element as defined by the SVG specification,
+    //          applying the transforms that apply to the element and its ancestors.
 
-    // FIXME: 3. Return a DOMRectList object containing DOMRect objects in content order, one for each box fragment,
+    // 3. Return a DOMRectList object containing DOMRect objects in content order, one for each box fragment,
     // describing its border area (including those with a height or width of zero) with the following constraints:
     // - Apply the transforms that apply to the element and its ancestors.
-    // - If the element on which the method was invoked has a computed value for the display property of table
-    // or inline-table include both the table box and the caption box, if any, but not the anonymous container box.
-    // - Replace each anonymous block box with its child box(es) and repeat this until no anonymous block boxes are left in the final list.
+    // FIXME: - If the element on which the method was invoked has a computed value for the display property of table
+    //          or inline-table include both the table box and the caption box, if any, but not the anonymous container box.
+    // FIXME: - Replace each anonymous block box with its child box(es) and repeat this until no anonymous block boxes
+    //          are left in the final list.
+    const_cast<Document&>(document()).update_layout();
+    auto navigable = document().navigable();
+    VERIFY(navigable);
+    auto viewport_offset = navigable->viewport_scroll_offset();
 
-    auto bounding_rect = get_bounding_client_rect();
-    rects.append(*bounding_rect);
+    // NOTE: Make sure CSS transforms are resolved before it is used to calculate the rect position.
+    const_cast<Document&>(document()).update_paint_and_hit_testing_properties_if_needed();
+
+    Gfx::AffineTransform transform;
+    CSSPixelPoint scroll_offset;
+    auto const* paintable = this->paintable();
+
+    if (auto const* paintable_box = this->paintable_box()) {
+        transform = Gfx::extract_2d_affine_transform(paintable_box->transform());
+        for (auto const* containing_block = paintable->containing_block(); containing_block; containing_block = containing_block->containing_block()) {
+            transform = Gfx::extract_2d_affine_transform(containing_block->transform()).multiply(transform);
+            scroll_offset.translate_by(containing_block->scroll_offset());
+        }
+
+        auto absolute_rect = paintable_box->absolute_border_box_rect();
+        auto transformed_rect = transform.map(absolute_rect.translated(-paintable_box->transform_origin()).to_type<float>())
+                                    .to_type<CSSPixels>()
+                                    .translated(paintable_box->transform_origin())
+                                    .translated(-scroll_offset)
+                                    .translated(-viewport_offset);
+        rects.append(Geometry::DOMRect::create(realm(), transformed_rect.to_type<float>()));
+    } else if (paintable && is<Painting::InlinePaintable>(*paintable)) {
+        auto const& inline_paintable = static_cast<Painting::InlinePaintable const&>(*paintable);
+        auto absolute_rect = inline_paintable.bounding_rect();
+        absolute_rect.translate_by(-scroll_offset);
+        absolute_rect.translate_by(-viewport_offset);
+        rects.append(Geometry::DOMRect::create(realm(), transform.map(absolute_rect.to_type<float>())));
+    } else if (paintable) {
+        dbgln("FIXME: Failed to get client rects for element ({})", debug_description());
+    }
+
     return Geometry::DOMRectList::create(realm(), move(rects));
 }
 
@@ -908,13 +966,13 @@ int Element::client_top() const
     const_cast<Document&>(document()).update_layout();
 
     // 1. If the element has no associated CSS layout box or if the CSS layout box is inline, return zero.
-    if (!layout_node() || !layout_node()->is_box())
+    if (!paintable_box())
         return 0;
 
     // 2. Return the computed value of the border-top-width property
     //    plus the height of any scrollbar rendered between the top padding edge and the top border edge,
     //    ignoring any transforms that apply to the element and its ancestors.
-    return static_cast<Layout::Box const&>(*layout_node()).computed_values().border_top().width.to_int();
+    return paintable_box()->computed_values().border_top().width.to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-clientleft
@@ -924,13 +982,13 @@ int Element::client_left() const
     const_cast<Document&>(document()).update_layout();
 
     // 1. If the element has no associated CSS layout box or if the CSS layout box is inline, return zero.
-    if (!layout_node() || !layout_node()->is_box())
+    if (!paintable_box())
         return 0;
 
     // 2. Return the computed value of the border-left-width property
     //    plus the width of any scrollbar rendered between the left padding edge and the left border edge,
     //    ignoring any transforms that apply to the element and its ancestors.
-    return static_cast<Layout::Box const&>(*layout_node()).computed_values().border_left().width.to_int();
+    return paintable_box()->computed_values().border_left().width.to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-clientwidth
@@ -981,6 +1039,35 @@ int Element::client_height() const
     // 3. Return the height of the padding edge excluding the height of any rendered scrollbar between the padding edge and the border edge,
     //    ignoring any transforms that apply to the element and its ancestors.
     return paintable_box()->absolute_padding_box_rect().height().to_int();
+}
+
+// https://drafts.csswg.org/cssom-view/#dom-element-currentcsszoom
+double Element::current_css_zoom() const
+{
+    dbgln("FIXME: Implement Element::current_css_zoom()");
+    return 1.0;
+}
+
+void Element::inserted()
+{
+    Base::inserted();
+
+    if (m_id.has_value())
+        document().element_with_id_was_added({}, *this);
+
+    if (m_name.has_value())
+        document().element_with_name_was_added({}, *this);
+}
+
+void Element::removed_from(Node* node)
+{
+    Base::removed_from(node);
+
+    if (m_id.has_value())
+        document().element_with_id_was_removed({}, *this);
+
+    if (m_name.has_value())
+        document().element_with_name_was_removed({}, *this);
 }
 
 void Element::children_changed()
@@ -1111,19 +1198,11 @@ double Element::scroll_top() const
         return window->scroll_y();
 
     // 8. If the element does not have any associated box, return zero and terminate these steps.
-    if (!layout_node() || !is<Layout::Box>(layout_node()))
+    if (!paintable_box())
         return 0.0;
-
-    // FIXME: Ideally we would stop creating a layout node for column group so that a layout node would always have
-    //        a paintable, but in the meantime, special case this node.
-    if (layout_node()->display().is_table_column_group()) {
-        VERIFY(!paintable_box());
-        return 0.0;
-    }
 
     // 9. Return the y-coordinate of the scrolling area at the alignment point with the top of the padding edge of the element.
     // FIXME: Is this correct?
-    VERIFY(paintable_box());
     return paintable_box()->scroll_offset().y().to_double();
 }
 
@@ -1159,19 +1238,11 @@ double Element::scroll_left() const
         return window->scroll_x();
 
     // 8. If the element does not have any associated box, return zero and terminate these steps.
-    if (!layout_node() || !is<Layout::Box>(layout_node()))
+    if (!paintable_box())
         return 0.0;
-
-    // FIXME: Ideally we would stop creating a layout node for column group so that a layout node would always have
-    //        a paintable, but in the meantime, special case this node.
-    if (layout_node()->display().is_table_column_group()) {
-        VERIFY(!paintable_box());
-        return 0.0;
-    }
 
     // 9. Return the x-coordinate of the scrolling area at the alignment point with the left of the padding edge of the element.
     // FIXME: Is this correct?
-    VERIFY(paintable_box());
     return paintable_box()->scroll_offset().x().to_double();
 }
 
@@ -1181,8 +1252,7 @@ void Element::set_scroll_left(double x)
     // 1. Let x be the given value.
 
     // 2. Normalize non-finite values for x.
-    if (!isfinite(x))
-        x = 0.0;
+    x = HTML::normalize_non_finite_values(x);
 
     // 3. Let document be the element’s node document.
     auto& document = this->document();
@@ -1207,26 +1277,21 @@ void Element::set_scroll_left(double x)
 
     // 8. If the element is the root element invoke scroll() on window with x as first argument and scrollY on window as second argument, and terminate these steps.
     if (document.document_element() == this) {
-        // FIXME: Implement this in terms of invoking scroll() on window.
-        if (document.browsing_context() == &document.page().top_level_browsing_context())
-            document.page().client().page_did_request_scroll_to({ static_cast<float>(x), static_cast<float>(window->scroll_y()) });
+        window->scroll(x, window->scroll_y());
         return;
     }
 
     // 9. If the element is the body element, document is in quirks mode, and the element is not potentially scrollable, invoke scroll() on window with x as first argument and scrollY on window as second argument, and terminate these steps.
     if (document.body() == this && document.in_quirks_mode() && !is_potentially_scrollable()) {
-        // FIXME: Implement this in terms of invoking scroll() on window.
-        if (document.browsing_context() == &document.page().top_level_browsing_context())
-            document.page().client().page_did_request_scroll_to({ static_cast<float>(x), static_cast<float>(window->scroll_y()) });
+        window->scroll(x, window->scroll_y());
         return;
     }
 
     // 10. If the element does not have any associated box, the element has no associated scrolling box, or the element has no overflow, terminate these steps.
-    if (!layout_node() || !is<Layout::Box>(layout_node()))
+    if (!paintable_box())
         return;
 
-    auto* box = static_cast<Layout::Box*>(layout_node());
-    if (!box->is_scroll_container())
+    if (!paintable_box()->layout_box().is_scroll_container())
         return;
 
     // FIXME: or the element has no overflow.
@@ -1243,8 +1308,7 @@ void Element::set_scroll_top(double y)
     // 1. Let y be the given value.
 
     // 2. Normalize non-finite values for y.
-    if (!isfinite(y))
-        y = 0.0;
+    y = HTML::normalize_non_finite_values(y);
 
     // 3. Let document be the element’s node document.
     auto& document = this->document();
@@ -1269,26 +1333,21 @@ void Element::set_scroll_top(double y)
 
     // 8. If the element is the root element invoke scroll() on window with scrollX on window as first argument and y as second argument, and terminate these steps.
     if (document.document_element() == this) {
-        // FIXME: Implement this in terms of invoking scroll() on window.
-        if (document.browsing_context() == &document.page().top_level_browsing_context())
-            document.page().client().page_did_request_scroll_to({ static_cast<float>(window->scroll_x()), static_cast<float>(y) });
+        window->scroll(window->scroll_x(), y);
         return;
     }
 
     // 9. If the element is the body element, document is in quirks mode, and the element is not potentially scrollable, invoke scroll() on window with scrollX as first argument and y as second argument, and terminate these steps.
     if (document.body() == this && document.in_quirks_mode() && !is_potentially_scrollable()) {
-        // FIXME: Implement this in terms of invoking scroll() on window.
-        if (document.browsing_context() == &document.page().top_level_browsing_context())
-            document.page().client().page_did_request_scroll_to({ static_cast<float>(window->scroll_x()), static_cast<float>(y) });
+        window->scroll(window->scroll_x(), y);
         return;
     }
 
     // 10. If the element does not have any associated box, the element has no associated scrolling box, or the element has no overflow, terminate these steps.
-    if (!layout_node() || !is<Layout::Box>(layout_node()))
+    if (!paintable_box())
         return;
 
-    auto* box = static_cast<Layout::Box*>(layout_node());
-    if (!box->is_scroll_container())
+    if (!paintable_box()->layout_box().is_scroll_container())
         return;
 
     // FIXME: or the element has no overflow.
@@ -1310,6 +1369,9 @@ int Element::scroll_width() const
     if (!document.is_active())
         return 0;
 
+    // NOTE: Ensure that layout is up-to-date before looking at metrics.
+    const_cast<Document&>(document).update_layout();
+
     // 3. Let viewport width be the width of the viewport excluding the width of the scroll bar, if any,
     //    or zero if there is no viewport.
     auto viewport_width = document.viewport_rect().width().to_int();
@@ -1330,7 +1392,7 @@ int Element::scroll_width() const
         return 0;
 
     // 7. Return the width of the element’s scrolling area.
-    return paintable_box()->border_box_width().to_int();
+    return paintable_box()->scrollable_overflow_rect()->width().to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-scrollheight
@@ -1342,6 +1404,9 @@ int Element::scroll_height() const
     // 2. If document is not the active document, return zero and terminate these steps.
     if (!document.is_active())
         return 0;
+
+    // NOTE: Ensure that layout is up-to-date before looking at metrics.
+    const_cast<Document&>(document).update_layout();
 
     // 3. Let viewport height be the height of the viewport excluding the height of the scroll bar, if any,
     //    or zero if there is no viewport.
@@ -1363,7 +1428,7 @@ int Element::scroll_height() const
         return 0;
 
     // 7. Return the height of the element’s scrolling area.
-    return paintable_box()->border_box_height().to_int();
+    return paintable_box()->scrollable_overflow_rect()->height().to_int();
 }
 
 // https://html.spec.whatwg.org/multipage/semantics-other.html#concept-element-disabled
@@ -1397,19 +1462,54 @@ bool Element::is_actually_disabled() const
     return false;
 }
 
-// https://w3c.github.io/DOM-Parsing/#dom-element-insertadjacenthtml
-WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, String const& text)
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-outerhtml
+WebIDL::ExceptionOr<String> Element::outer_html() const
 {
+    return serialize_fragment(DOMParsing::RequireWellFormed::Yes, FragmentSerializationMode::Outer);
+}
+
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-outerhtml
+WebIDL::ExceptionOr<void> Element::set_outer_html(String const& value)
+{
+    // 1. Let parent be this's parent.
+    auto* parent = this->parent();
+
+    // 2. If parent is null, return. There would be no way to obtain a reference to the nodes created even if the remaining steps were run.
+    if (!parent)
+        return {};
+
+    // 3. If parent is a Document, throw a "NoModificationAllowedError" DOMException.
+    if (parent->is_document())
+        return WebIDL::NoModificationAllowedError::create(realm(), "Cannot set outer HTML on document"_fly_string);
+
+    // 4. If parent is a DocumentFragment, set parent to the result of creating an element given this's node document, body, and the HTML namespace.
+    if (parent->is_document_fragment())
+        parent = TRY(create_element(document(), HTML::TagNames::body, Namespace::HTML));
+
+    // 5. Let fragment be the result of invoking the fragment parsing algorithm steps given parent and the given value.
+    auto fragment = TRY(DOMParsing::parse_fragment(value, verify_cast<Element>(*parent)));
+
+    // 6. Replace this with fragment within this's parent.
+    TRY(parent->replace_child(fragment, *this));
+
+    return {};
+}
+
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#the-insertadjacenthtml()-method
+WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, String const& string)
+{
+    // 1. Let context be null.
     JS::GCPtr<Node> context;
-    // 1. Use the first matching item from this list:
+
+    // 2. Use the first matching item from this list:
     // - If position is an ASCII case-insensitive match for the string "beforebegin"
     // - If position is an ASCII case-insensitive match for the string "afterend"
     if (Infra::is_ascii_case_insensitive_match(position, "beforebegin"sv)
         || Infra::is_ascii_case_insensitive_match(position, "afterend"sv)) {
-        // Let context be the context object's parent.
+        // 1. Set context to this's parent.
         context = this->parent();
 
-        // If context is null or a Document, throw a "NoModificationAllowedError" DOMException.
+        // 2. If context is null or a Document, throw a "NoModificationAllowedError" DOMException.
         if (!context || context->is_document())
             return WebIDL::NoModificationAllowedError::create(realm(), "insertAdjacentHTML: context is null or a Document"_fly_string);
     }
@@ -1417,7 +1517,7 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
     // - If position is an ASCII case-insensitive match for the string "beforeend"
     else if (Infra::is_ascii_case_insensitive_match(position, "afterbegin"sv)
         || Infra::is_ascii_case_insensitive_match(position, "beforeend"sv)) {
-        // Let context be the context object.
+        // Set context to this.
         context = this;
     }
     // Otherwise
@@ -1426,7 +1526,7 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
         return WebIDL::SyntaxError::create(realm(), "insertAdjacentHTML: invalid position argument"_fly_string);
     }
 
-    // 2. If context is not an Element or the following are all true:
+    // 3. If context is not an Element or the following are all true:
     //    - context's node document is an HTML document,
     //    - context's local name is "html", and
     //    - context's namespace is the HTML namespace;
@@ -1434,39 +1534,35 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
         || (context->document().document_type() == Document::Type::HTML
             && static_cast<Element const&>(*context).local_name() == "html"sv
             && static_cast<Element const&>(*context).namespace_uri() == Namespace::HTML)) {
-        // FIXME: let context be a new Element with
-        //        - body as its local name,
-        //        - The HTML namespace as its namespace, and
-        //        - The context object's node document as its node document.
-        TODO();
+        context = TRY(create_element(document(), HTML::TagNames::body, Namespace::HTML));
     }
 
-    // 3. Let fragment be the result of invoking the fragment parsing algorithm with text as markup, and context as the context element.
-    auto fragment = TRY(DOMParsing::parse_fragment(text, verify_cast<Element>(*context)));
+    // 4. Let fragment be the result of invoking the fragment parsing algorithm steps with context and string.
+    auto fragment = TRY(DOMParsing::parse_fragment(string, verify_cast<Element>(*context)));
 
-    // 4. Use the first matching item from this list:
+    // 5. Use the first matching item from this list:
 
     // - If position is an ASCII case-insensitive match for the string "beforebegin"
     if (Infra::is_ascii_case_insensitive_match(position, "beforebegin"sv)) {
-        // Insert fragment into the context object's parent before the context object.
+        // Insert fragment into this's parent before this.
         parent()->insert_before(fragment, this);
     }
 
     // - If position is an ASCII case-insensitive match for the string "afterbegin"
     else if (Infra::is_ascii_case_insensitive_match(position, "afterbegin"sv)) {
-        // Insert fragment into the context object before its first child.
+        // Insert fragment into this before its first child.
         insert_before(fragment, first_child());
     }
 
     // - If position is an ASCII case-insensitive match for the string "beforeend"
     else if (Infra::is_ascii_case_insensitive_match(position, "beforeend"sv)) {
-        // Append fragment to the context object.
+        // Append fragment to this.
         TRY(append_child(fragment));
     }
 
     // - If position is an ASCII case-insensitive match for the string "afterend"
     else if (Infra::is_ascii_case_insensitive_match(position, "afterend"sv)) {
-        // Insert fragment into the context object's parent before the context object's next sibling.
+        // Insert fragment into this's parent before this's next sibling.
         parent()->insert_before(fragment, next_sibling());
     }
     return {};
@@ -1619,7 +1715,7 @@ static ErrorOr<void> scroll_an_element_into_view(DOM::Element& target, Bindings:
             }
             // 3. Otherwise, if block is "center", then align the center of target bounding border box with the center of scrolling box in scrolling box’s block flow direction.
             else if (block == Bindings::ScrollLogicalPosition::Center) {
-                TODO();
+                y = element_edge_a + (element_height / 2) - (scrolling_box_height / 2);
             }
             // 4. Otherwise, block is "nearest":
             else {
@@ -1676,11 +1772,10 @@ static ErrorOr<void> scroll_an_element_into_view(DOM::Element& target, Bindings:
             (void)behavior;
 
             // AD-HOC:
-            auto& page = document.navigable()->traversable_navigable()->page();
             // NOTE: Since calculated position is relative to the viewport, we need to add the viewport's position to it
-            //       before passing to page_did_request_scroll_to() that expects a position relative to the page.
+            //       before passing to perform_scroll_of_viewport() that expects a position relative to the page.
             position.set_y(position.y() + scrolling_box.y());
-            page.client().page_did_request_scroll_to(position);
+            document.navigable()->perform_scroll_of_viewport(position);
         }
         // If scrolling box is associated with an element
         else {
@@ -1823,7 +1918,7 @@ void Element::enqueue_an_element_on_the_appropriate_element_queue()
 
         // 4. Queue a microtask to perform the following steps:
         // NOTE: `this` is protected by JS::SafeFunction
-        HTML::queue_a_microtask(&document(), [this]() {
+        HTML::queue_a_microtask(&document(), JS::create_heap_function(relevant_agent.heap(), [this]() {
             auto& relevant_agent = HTML::relevant_agent(*this);
             auto* custom_data = verify_cast<Bindings::WebEngineCustomData>(relevant_agent.custom_data());
             auto& reactions_stack = custom_data->custom_element_reactions_stack;
@@ -1833,7 +1928,7 @@ void Element::enqueue_an_element_on_the_appropriate_element_queue()
 
             // 2. Unset reactionsStack's processing the backup element queue flag.
             reactions_stack.processing_the_backup_element_queue = false;
-        });
+        }));
 
         return;
     }
@@ -1864,7 +1959,7 @@ void Element::enqueue_a_custom_element_callback_reaction(FlyString const& callba
     if (callback_iterator == definition->lifecycle_callbacks().end())
         return;
 
-    if (callback_iterator->value.is_null())
+    if (!callback_iterator->value)
         return;
 
     // 4. If callbackName is "attributeChangedCallback", then:
@@ -1964,7 +2059,8 @@ JS::ThrowCompletionOr<void> Element::upgrade_element(JS::NonnullGCPtr<HTML::Cust
         m_custom_element_definition = nullptr;
 
         // 2. Empty element's custom element reaction queue.
-        m_custom_element_reaction_queue = nullptr;
+        if (m_custom_element_reaction_queue)
+            m_custom_element_reaction_queue->clear();
 
         // 3. Rethrow the exception (thus terminating this algorithm).
         return maybe_exception.release_error();
@@ -2036,12 +2132,12 @@ void Element::for_each_attribute(Function<void(FlyString const&, String const&)>
     });
 }
 
-Layout::NodeWithStyle* Element::layout_node()
+JS::GCPtr<Layout::NodeWithStyle> Element::layout_node()
 {
     return static_cast<Layout::NodeWithStyle*>(Node::layout_node());
 }
 
-Layout::NodeWithStyle const* Element::layout_node() const
+JS::GCPtr<Layout::NodeWithStyle const> Element::layout_node() const
 {
     return static_cast<Layout::NodeWithStyle const*>(Node::layout_node());
 }
@@ -2088,15 +2184,110 @@ HashMap<FlyString, CSS::StyleProperty> const& Element::custom_properties(Optiona
 // https://drafts.csswg.org/cssom-view/#dom-element-scroll
 void Element::scroll(double x, double y)
 {
-    // AD-HOC:
-    if (auto* paintable_box = this->paintable_box())
-        paintable_box->scroll_by(x, y);
+    // 1. If invoked with one argument, follow these substeps:
+    //    NOTE: Not relevant here.
+    // 2. If invoked with two arguments, follow these substeps:
+    //     1. Let options be null converted to a ScrollToOptions dictionary. [WEBIDL]
+    //     2. Let x and y be the arguments, respectively.
+    //     3. Normalize non-finite values for x and y.
+    //     4. Let the left dictionary member of options have the value x.
+    //     5. Let the top dictionary member of options have the value y.
+    x = HTML::normalize_non_finite_values(x);
+    y = HTML::normalize_non_finite_values(y);
+
+    // 3. Let document be the element’s node document.
+    auto& document = this->document();
+
+    // 4. If document is not the active document, terminate these steps.
+    if (!document.is_active())
+        return;
+
+    // 5. Let window be the value of document’s defaultView attribute.
+    auto* window = document.default_view();
+
+    // 6. If window is null, terminate these steps.
+    if (!window)
+        return;
+
+    // 7. If the element is the root element and document is in quirks mode, terminate these steps.
+    if (document.document_element() == this && document.in_quirks_mode())
+        return;
+
+    // NOTE: Ensure that layout is up-to-date before looking at metrics.
+    document.update_layout();
+
+    // 8. If the element is the root element invoke scroll() on window with scrollX on window as first argument and y as second argument, and terminate these steps.
+    if (document.document_element() == this) {
+        window->scroll(window->scroll_x(), y);
+        return;
+    }
+
+    // 9. If the element is the body element, document is in quirks mode, and the element is not potentially scrollable, invoke scroll() on window
+    //    with options as the only argument, and terminate these steps.
+    if (document.body() == this && document.in_quirks_mode() && !is_potentially_scrollable()) {
+        window->scroll(x, y);
+        return;
+    }
+
+    // 10. If the element does not have any associated box, the element has no associated scrolling box, or the element has no overflow, terminate these steps.
+    // FIXME: or the element has no overflow
+    if (!paintable_box())
+        return;
+
+    // 11. Scroll the element to x,y, with the scroll behavior being the value of the behavior dictionary member of options.
+    // FIXME: Implement this in terms of calling "scroll the element".
+    auto scroll_offset = paintable_box()->scroll_offset();
+    scroll_offset.set_x(CSSPixels::nearest_value_for(x));
+    scroll_offset.set_y(CSSPixels::nearest_value_for(y));
+    paintable_box()->set_scroll_offset(scroll_offset);
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-scroll
-void Element::scroll(HTML::ScrollToOptions const&)
+void Element::scroll(HTML::ScrollToOptions options)
 {
-    dbgln("FIXME: Implement Element::scroll(ScrollToOptions)");
+    // 1. If invoked with one argument, follow these substeps:
+    //     1. Let options be the argument.
+    //     2. Normalize non-finite values for left and top dictionary members of options, if present.
+    //     3. Let x be the value of the left dictionary member of options, if present, or the element’s current scroll position on the x axis otherwise.
+    //     4. Let y be the value of the top dictionary member of options, if present, or the element’s current scroll position on the y axis otherwise.
+    // NOTE: remaining steps performed by Element::scroll(double x, double y)
+    auto x = options.left.has_value() ? HTML::normalize_non_finite_values(options.left.value()) : scroll_left();
+    auto y = options.top.has_value() ? HTML::normalize_non_finite_values(options.top.value()) : scroll_top();
+    scroll(x, y);
+}
+
+// https://drafts.csswg.org/cssom-view/#dom-element-scrollby
+void Element::scroll_by(double x, double y)
+{
+    // 1. Let options be null converted to a ScrollToOptions dictionary. [WEBIDL]
+    HTML::ScrollToOptions options;
+
+    // 2. Let x and y be the arguments, respectively.
+    // 3. Normalize non-finite values for x and y.
+    // 4. Let the left dictionary member of options have the value x.
+    // 5. Let the top dictionary member of options have the value y.
+    // NOTE: Element::scroll_by(HTML::ScrollToOptions) performs the normalization and following steps.
+    options.left = x;
+    options.top = y;
+    scroll_by(options);
+}
+
+// https://drafts.csswg.org/cssom-view/#dom-element-scrollby
+void Element::scroll_by(HTML::ScrollToOptions options)
+{
+    // 1. Let options be the argument.
+    // 2. Normalize non-finite values for left and top dictionary members of options, if present.
+    auto left = HTML::normalize_non_finite_values(options.left);
+    auto top = HTML::normalize_non_finite_values(options.top);
+
+    // 3. Add the value of scrollLeft to the left dictionary member.
+    options.left = scroll_left() + left;
+
+    // 4. Add the value of scrollTop to the top dictionary member.
+    options.top = scroll_top() + top;
+
+    // 5. Act as if the scroll() method was invoked with options as the only argument.
+    scroll(options);
 }
 
 bool Element::id_reference_exists(String const& id_reference) const
@@ -2133,9 +2324,65 @@ IntersectionObserver::IntersectionObserverRegistration& Element::get_intersectio
 // https://html.spec.whatwg.org/multipage/dom.html#the-directionality
 Element::Directionality Element::directionality() const
 {
-    // The directionality of an element (any element, not just an HTML element) is either 'ltr' or 'rtl',
-    // and is determined as per the first appropriate set of steps from the following list:
+    // The directionality of an element (any element, not just an HTML element) is either 'ltr' or 'rtl'.
+    // To compute the directionality given an element element, switch on element's dir attribute state:
+    auto maybe_dir = this->dir();
+    if (maybe_dir.has_value()) {
+        auto dir = maybe_dir.release_value();
+        switch (dir) {
+        // -> ltr
+        case Dir::Ltr:
+            // Return 'ltr'.
+            return Directionality::Ltr;
+        // -> rtl
+        case Dir::Rtl:
+            // Return 'rtl'.
+            return Directionality::Rtl;
+        // -> auto
+        case Dir::Auto:
+            // 1. Let result be the auto directionality of element.
+            auto result = auto_directionality();
 
+            // 2. If result is null, then return 'ltr'.
+            if (!result.has_value())
+                return Directionality::Ltr;
+
+            // 3. Return result.
+            return result.release_value();
+        }
+    }
+    // -> undefined
+    VERIFY(!maybe_dir.has_value());
+
+    // FIXME: If element is a bdi element:
+    // FIXME:     1. Let result be the auto directionality of element.
+    // FIXME:     2. If result is null, then return 'ltr'.
+    // FIXME:     3. Return result.
+
+    // If element is an input element whose type attribute is in the Telephone state:
+    if (is<HTML::HTMLInputElement>(this) && static_cast<HTML::HTMLInputElement const&>(*this).type_state() == HTML::HTMLInputElement::TypeAttributeState::Telephone) {
+        // Return 'ltr'.
+        return Directionality::Ltr;
+    }
+
+    // Otherwise:
+    // Return the parent directionality of element.
+    return parent_directionality();
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#auto-directionality-form-associated-elements
+bool Element::is_auto_directionality_form_associated_element() const
+{
+    // The auto-directionality form-associated elements are:
+    // input elements whose type attribute is in the Hidden, Text, Search, Telephone, URL, Email, Password, Submit Button, Reset Button, or Button state,
+    // and textarea elements.
+    return is<HTML::HTMLTextAreaElement>(this)
+        || (is<HTML::HTMLInputElement>(this) && first_is_one_of(static_cast<HTML::HTMLInputElement const&>(*this).type_state(), HTML::HTMLInputElement::TypeAttributeState::Hidden, HTML::HTMLInputElement::TypeAttributeState::Text, HTML::HTMLInputElement::TypeAttributeState::Search, HTML::HTMLInputElement::TypeAttributeState::Telephone, HTML::HTMLInputElement::TypeAttributeState::URL, HTML::HTMLInputElement::TypeAttributeState::Email, HTML::HTMLInputElement::TypeAttributeState::Password, HTML::HTMLInputElement::TypeAttributeState::SubmitButton, HTML::HTMLInputElement::TypeAttributeState::ResetButton, HTML::HTMLInputElement::TypeAttributeState::Button));
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#auto-directionality
+Optional<Element::Directionality> Element::auto_directionality() const
+{
     static auto bidirectional_class_L = Unicode::bidirectional_class_from_string("L"sv);
     static auto bidirectional_class_AL = Unicode::bidirectional_class_from_string("AL"sv);
     static auto bidirectional_class_R = Unicode::bidirectional_class_from_string("R"sv);
@@ -2144,46 +2391,39 @@ Element::Directionality Element::directionality() const
     if (!bidirectional_class_L.has_value())
         return Directionality::Ltr;
 
-    auto dir = this->dir();
+    // https://html.spec.whatwg.org/multipage/dom.html#text-node-directionality
+    auto text_node_directionality = [](Text const& text_node) -> Optional<Directionality> {
+        // 1. If text's data does not contain a code point whose bidirectional character type is L, AL, or R, then return null.
+        // 2. Let codePoint be the first code point in text's data whose bidirectional character type is L, AL, or R.
+        Optional<Unicode::BidirectionalClass> found_character_bidi_class;
+        for (auto code_point : Utf8View(text_node.data())) {
+            auto bidi_class = Unicode::bidirectional_class(code_point);
+            if (first_is_one_of(bidi_class, bidirectional_class_L, bidirectional_class_AL, bidirectional_class_R)) {
+                found_character_bidi_class = bidi_class;
+                break;
+            }
+        }
+        if (!found_character_bidi_class.has_value())
+            return {};
 
-    // -> If the element's dir attribute is in the ltr state
-    // -> If the element is a document element and the dir attribute is not in a defined state
-    //    (i.e. it is not present or has an invalid value)
-    // -> If the element is an input element whose type attribute is in the Telephone state, and the
-    //    dir attribute is not in a defined state (i.e. it is not present or has an invalid value)
-    if (dir == Dir::Ltr
-        || (is_document_element() && !dir.has_value())
-        || (is<HTML::HTMLInputElement>(this)
-            && static_cast<HTML::HTMLInputElement const&>(*this).type_state() == HTML::HTMLInputElement::TypeAttributeState::Telephone
-            && !dir.has_value())) {
-        // The directionality of the element is 'ltr'.
+        // 3. If codePoint is of bidirectional character type AL or R, then return 'rtl'.
+        if (first_is_one_of(*found_character_bidi_class, bidirectional_class_AL, bidirectional_class_R))
+            return Directionality::Rtl;
+
+        // 4. If codePoint is of bidirectional character type L, then return 'ltr'.
+        // NOTE: codePoint should always be of bidirectional character type L by this point, so we can just return 'ltr' here.
+        VERIFY(*found_character_bidi_class == bidirectional_class_L);
         return Directionality::Ltr;
-    }
+    };
 
-    // -> If the element's dir attribute is in the rtl state
-    if (dir == Dir::Rtl) {
-        // The directionality of the element is 'rtl'.
-        return Directionality::Rtl;
-    }
+    // 1. If element is an auto-directionality form-associated element:
+    if (is_auto_directionality_form_associated_element()) {
+        auto const* form_associated_element = dynamic_cast<HTML::FormAssociatedElement const*>(this);
+        VERIFY(form_associated_element);
+        auto const& value = form_associated_element->value();
 
-    // -> If the element is an input element whose type attribute is in the Text, Search, Telephone,
-    //    URL, or Email state, and the dir attribute is in the auto state
-    // -> If the element is a textarea element and the dir attribute is in the auto state
-    if ((is<HTML::HTMLInputElement>(this)
-            && first_is_one_of(static_cast<HTML::HTMLInputElement const&>(*this).type_state(),
-                HTML::HTMLInputElement::TypeAttributeState::Text, HTML::HTMLInputElement::TypeAttributeState::Search,
-                HTML::HTMLInputElement::TypeAttributeState::Telephone, HTML::HTMLInputElement::TypeAttributeState::URL,
-                HTML::HTMLInputElement::TypeAttributeState::Email)
-            && dir == Dir::Auto)
-        || (is<HTML::HTMLTextAreaElement>(this) && dir == Dir::Auto)) {
-
-        auto value = is<HTML::HTMLInputElement>(this)
-            ? static_cast<HTML::HTMLInputElement const&>(*this).value()
-            : static_cast<HTML::HTMLTextAreaElement const&>(*this).value();
-
-        // If the element's value contains a character of bidirectional character type AL or R, and
-        // there is no character of bidirectional character type L anywhere before it in the element's
-        // value, then the directionality of the element is 'rtl'. [BIDI]
+        // 1. If element's value contains a character of bidirectional character type AL or R,
+        //    and there is no character of bidirectional character type L anywhere before it in the element's value, then return 'rtl'.
         for (auto code_point : Utf8View(value)) {
             auto bidi_class = Unicode::bidirectional_class(code_point);
             if (bidi_class == bidirectional_class_L)
@@ -2192,87 +2432,114 @@ Element::Directionality Element::directionality() const
                 return Directionality::Rtl;
         }
 
-        // Otherwise, if the element's value is not the empty string, or if the element is a document element,
-        // the directionality of the element is 'ltr'.
-        if (!value.is_empty() || is_document_element()) {
+        // 2. If element's value is not the empty string, then return 'ltr'.
+        if (value.is_empty())
             return Directionality::Ltr;
-        }
-        // Otherwise, the directionality of the element is the same as the element's parent element's directionality.
-        else {
-            return parent_element()->directionality();
-        }
+
+        // 3. Return null.
+        return {};
     }
 
-    // -> If the element's dir attribute is in the auto state
-    // FIXME: -> If the element is a bdi element and the dir attribute is not in a defined state
-    //    (i.e. it is not present or has an invalid value)
-    if (dir == Dir::Auto) {
-        // Find the first character in tree order that matches the following criteria:
-        // - The character is from a Text node that is a descendant of the element whose directionality is being determined.
-        // - The character is of bidirectional character type L, AL, or R. [BIDI]
-        // - The character is not in a Text node that has an ancestor element that is a descendant of
-        //   the element whose directionality is being determined and that is either:
-        //   - FIXME: A bdi element.
-        //   - A script element.
-        //   - A style element.
-        //   - A textarea element.
-        //   - An element with a dir attribute in a defined state.
-        Optional<u32> found_character;
-        Optional<Unicode::BidirectionalClass> found_character_bidi_class;
-        for_each_in_subtree_of_type<Text>([&](Text const& text_node) {
-            // Discard not-allowed ancestors
-            for (auto* ancestor = text_node.parent(); ancestor && ancestor != this; ancestor = ancestor->parent()) {
-                if (is<HTML::HTMLScriptElement>(*ancestor) || is<HTML::HTMLStyleElement>(*ancestor) || is<HTML::HTMLTextAreaElement>(*ancestor))
-                    return IterationDecision::Continue;
-                if (ancestor->is_element()) {
-                    auto ancestor_element = static_cast<Element const*>(ancestor);
-                    if (ancestor_element->dir().has_value())
-                        return IterationDecision::Continue;
+    // 2. If element is a slot element whose root is a shadow root and element's assigned nodes are not empty:
+    if (is<HTML::HTMLSlotElement>(this)) {
+        auto const& slot = static_cast<HTML::HTMLSlotElement const&>(*this);
+        if (slot.root().is_shadow_root() && !slot.assigned_nodes().is_empty()) {
+            // 1 . For each node child of element's assigned nodes:
+            for (auto const& child : slot.assigned_nodes()) {
+                // 1. Let childDirection be null.
+                Optional<Directionality> child_direction;
+
+                // 2. If child is a Text node, then set childDirection to the text node directionality of child.
+                if (child->is_text())
+                    child_direction = text_node_directionality(static_cast<Text const&>(*child));
+
+                // 3. Otherwise:
+                else {
+                    // 1. Assert: child is an Element node.
+                    VERIFY(child->is_element());
+
+                    // 2. Set childDirection to the auto directionality of child.
+                    child_direction = static_cast<HTML::HTMLElement const&>(*this).auto_directionality();
                 }
+
+                // 4. If childDirection is not null, then return childDirection.
+                if (child_direction.has_value())
+                    return child_direction;
             }
 
-            // Look for matching characters
-            for (auto code_point : Utf8View(text_node.data())) {
-                auto bidi_class = Unicode::bidirectional_class(code_point);
-                if (first_is_one_of(bidi_class, bidirectional_class_L, bidirectional_class_AL, bidirectional_class_R)) {
-                    found_character = code_point;
-                    found_character_bidi_class = bidi_class;
-                    return IterationDecision::Break;
-                }
+            // 2. Return null.
+            return {};
+        }
+    }
+
+    // 3. For each node descendant of element's descendants, in tree order:
+    Optional<Directionality> result;
+    for_each_in_subtree([&](auto& descendant) {
+        // 1. If descendant, or any of its ancestor elements that are descendants of element, is one of
+        // - FIXME: a bdi element
+        // - a script element
+        // - a style element
+        // - a textarea element
+        // - an element whose dir attribute is not in the undefined state
+        // then continue.
+        if (is<HTML::HTMLScriptElement>(descendant)
+            || is<HTML::HTMLStyleElement>(descendant)
+            || is<HTML::HTMLTextAreaElement>(descendant)
+            || (is<Element>(descendant) && static_cast<Element const&>(descendant).dir().has_value())) {
+            return TraversalDecision::SkipChildrenAndContinue;
+        }
+
+        // 2. If descendant is a slot element whose root is a shadow root, then return the directionality of that shadow root's host.
+        if (is<HTML::HTMLSlotElement>(descendant)) {
+            auto const& root = static_cast<HTML::HTMLSlotElement const&>(descendant).root();
+            if (root.is_shadow_root()) {
+                auto const& host = static_cast<ShadowRoot const&>(root).host();
+                VERIFY(host);
+                result = host->directionality();
+                return TraversalDecision::Break;
             }
+        }
 
-            return IterationDecision::Continue;
-        });
+        // 3. If descendant is not a Text node, then continue.
+        if (!descendant.is_text())
+            return TraversalDecision::Continue;
 
-        // If such a character is found and it is of bidirectional character type AL or R,
-        // the directionality of the element is 'rtl'.
-        if (found_character.has_value()
-            && first_is_one_of(found_character_bidi_class.value(), bidirectional_class_AL, bidirectional_class_R)) {
-            return Directionality::Rtl;
-        }
-        // If such a character is found and it is of bidirectional character type L,
-        // the directionality of the element is 'ltr'.
-        if (found_character.has_value() && found_character_bidi_class.value() == bidirectional_class_L) {
-            return Directionality::Ltr;
-        }
-        // Otherwise, if the element is a document element, the directionality of the element is 'ltr'.
-        else if (is_document_element()) {
-            return Directionality::Ltr;
-        }
-        // Otherwise, the directionality of the element is the same as the element's parent element's directionality.
-        else {
-            return parent_element()->directionality();
-        }
+        // 4. Let result be the text node directionality of descendant.
+        result = text_node_directionality(static_cast<Text const&>(descendant));
+
+        // 5. If result is not null, then return result.
+        if (result.has_value())
+            return TraversalDecision::Break;
+
+        return TraversalDecision::Continue;
+    });
+
+    if (result.has_value())
+        return result;
+
+    // 4. Return null.
+    return {};
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#parent-directionality
+Element::Directionality Element::parent_directionality() const
+{
+    // 1. Let parentNode be element's parent node.
+    auto const* parent_node = this->parent_node();
+
+    // 2. If parentNode is a shadow root, then return the directionality of parentNode's host.
+    if (is<ShadowRoot>(parent_node)) {
+        auto const& host = static_cast<ShadowRoot const&>(*parent_node).host();
+        VERIFY(host);
+        return host->directionality();
     }
 
-    // If the element has a parent element and the dir attribute is not in a defined state
-    // (i.e. it is not present or has an invalid value)
-    if (parent_element() && !dir.has_value()) {
-        // The directionality of the element is the same as the element's parent element's directionality.
-        return parent_element()->directionality();
-    }
+    // 3. If parentNode is an element, then return the directionality of parentNode.
+    if (is<Element>(parent_node))
+        return static_cast<Element const&>(*parent_node).directionality();
 
-    VERIFY_NOT_REACHED();
+    // 4. Return 'ltr'.
+    return Directionality::Ltr;
 }
 
 // https://dom.spec.whatwg.org/#ref-for-concept-element-attributes-change-ext①
@@ -2313,6 +2580,27 @@ auto Element::ensure_custom_element_reaction_queue() -> CustomElementReactionQue
     if (!m_custom_element_reaction_queue)
         m_custom_element_reaction_queue = make<CustomElementReactionQueue>();
     return *m_custom_element_reaction_queue;
+}
+
+CSS::StyleSheetList& Element::document_or_shadow_root_style_sheets()
+{
+    auto& root_node = root();
+    if (is<DOM::ShadowRoot>(root_node))
+        return static_cast<DOM::ShadowRoot&>(root_node).style_sheets();
+
+    return document().style_sheets();
+}
+
+// https://html.spec.whatwg.org/#dom-element-gethtml
+WebIDL::ExceptionOr<String> Element::get_html(GetHTMLOptions const& options) const
+{
+    // Element's getHTML(options) method steps are to return the result
+    // of HTML fragment serialization algorithm with this,
+    // options["serializableShadowRoots"], and options["shadowRoots"].
+    return HTML::HTMLParser::serialize_html_fragment(
+        *this,
+        options.serializable_shadow_roots ? HTML::HTMLParser::SerializableShadowRoots::Yes : HTML::HTMLParser::SerializableShadowRoots::No,
+        options.shadow_roots);
 }
 
 }

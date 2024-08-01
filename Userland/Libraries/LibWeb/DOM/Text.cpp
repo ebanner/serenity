@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/TextPrototype.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -28,15 +29,14 @@ Text::Text(Document& document, NodeType type, String const& data)
 void Text::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::TextPrototype>(realm, "Text"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Text);
 }
 
 void Text::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     SlottableMixin::visit_edges(visitor);
-
-    visitor.visit(dynamic_cast<JS::Cell*>(m_owner.ptr()));
+    visitor.visit(m_owner);
 }
 
 // https://dom.spec.whatwg.org/#dom-text-text
@@ -45,6 +45,15 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Text>> Text::construct_impl(JS::Realm& real
     // The new Text(data) constructor steps are to set this’s data to data and this’s node document to current global object’s associated Document.
     auto& window = verify_cast<HTML::Window>(HTML::current_global_object());
     return realm.heap().allocate<Text>(realm, window.associated_document(), data);
+}
+
+EditableTextNodeOwner* Text::editable_text_node_owner()
+{
+    if (!m_owner)
+        return nullptr;
+    EditableTextNodeOwner* owner = dynamic_cast<EditableTextNodeOwner*>(m_owner.ptr());
+    VERIFY(owner);
+    return owner;
 }
 
 // https://dom.spec.whatwg.org/#dom-text-splittext

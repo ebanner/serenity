@@ -46,6 +46,16 @@ public:
         return m_svg_transform;
     }
 
+    bool draw_svg_geometry_for_clip_path() const
+    {
+        return m_draw_svg_geometry_for_clip_path;
+    }
+
+    void set_draw_svg_geometry_for_clip_path(bool draw_svg_geometry_for_clip_path)
+    {
+        m_draw_svg_geometry_for_clip_path = draw_svg_geometry_for_clip_path;
+    }
+
     DevicePixels enclosing_device_pixels(CSSPixels css_pixels) const;
     DevicePixels floored_device_pixels(CSSPixels css_pixels) const;
     DevicePixels rounded_device_pixels(CSSPixels css_pixels) const;
@@ -74,11 +84,7 @@ public:
 
     u32 allocate_corner_clipper_id() { return m_next_corner_clipper_id++; }
 
-    struct ScrollFrame {
-        i32 id { -1 };
-        CSSPixelPoint offset;
-    };
-    HashMap<Painting::PaintableBox const*, ScrollFrame>& scroll_frames() { return m_scroll_frames; }
+    u64 paint_generation_id() const { return m_paint_generation_id; }
 
 private:
     Painting::RecordingPainter& m_recording_painter;
@@ -88,9 +94,10 @@ private:
     bool m_should_show_line_box_borders { false };
     bool m_should_paint_overlay { true };
     bool m_focus { false };
+    bool m_draw_svg_geometry_for_clip_path { false };
     Gfx::AffineTransform m_svg_transform;
     u32 m_next_corner_clipper_id { 0 };
-    HashMap<Painting::PaintableBox const*, ScrollFrame> m_scroll_frames;
+    u64 m_paint_generation_id { 0 };
 };
 
 }

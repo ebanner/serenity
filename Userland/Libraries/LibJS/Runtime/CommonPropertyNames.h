@@ -110,6 +110,8 @@ namespace JS {
     P(compactDisplay)                        \
     P(compareExchange)                       \
     P(compile)                               \
+    P(composite)                             \
+    P(computedOffset)                        \
     P(concat)                                \
     P(configurable)                          \
     P(console)                               \
@@ -157,6 +159,7 @@ namespace JS {
     P(done)                                  \
     P(dotAll)                                \
     P(drop)                                  \
+    P(easing)                                \
     P(encodeURI)                             \
     P(encodeURIComponent)                    \
     P(endsWith)                              \
@@ -611,6 +614,7 @@ struct CommonPropertyNames {
     PropertyKey register_ { "register", PropertyKey::StringMayBeNumber::No };
     PropertyKey return_ { "return", PropertyKey::StringMayBeNumber::No };
     PropertyKey throw_ { "throw", PropertyKey::StringMayBeNumber::No };
+    PropertyKey try_ { "try", PropertyKey::StringMayBeNumber::No };
     PropertyKey union_ { "union", PropertyKey::StringMayBeNumber::No };
     PropertyKey xor_ { "xor", PropertyKey::StringMayBeNumber::No };
     PropertyKey inputAlias { "$_", PropertyKey::StringMayBeNumber::No };

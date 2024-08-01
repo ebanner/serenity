@@ -8,7 +8,6 @@
 #include <AK/BitStream.h>
 #include <AK/Endian.h>
 #include <AK/MemoryStream.h>
-#include <AK/Tuple.h>
 #include <LibPDF/CommonNames.h>
 #include <LibPDF/Document.h>
 #include <LibPDF/DocumentParser.h>
@@ -65,11 +64,37 @@ PDFErrorOr<Value> DocumentParser::parse_object_with_index(u32 index)
 {
     VERIFY(m_xref_table->has_object(index));
 
+    // PDF spec 1.7, Indirect Objects:
+    // "An indirect reference to an undefined object is not an error; it is simply treated as a reference to the null object."
+    // FIXME: Should this apply to the !has_object() case right above too?
+    if (!m_xref_table->is_object_in_use(index))
+        return nullptr;
+
+    // If this is called to resolve an indirect object reference while parsing another object,
+    // make sure to restore the current position after parsing the indirect object, so that the
+    // parser can keep parsing the original object stream afterwards.
+    // parse_compressed_object_with_index() also moves the reader's position, so this needs
+    // to be before the potential call to parse_compressed_object_with_index().
+    class SavePoint {
+    public:
+        SavePoint(Reader& reader)
+            : m_reader(reader)
+        {
+            m_reader.save();
+        }
+        ~SavePoint() { m_reader.load(); }
+
+    private:
+        Reader& m_reader;
+    };
+    SavePoint restore_current_position { m_reader };
+
     if (m_xref_table->is_object_compressed(index))
         // The object can be found in a object stream
         return parse_compressed_object_with_index(index);
 
     auto byte_offset = m_xref_table->byte_offset_for_object(index);
+
     m_reader.move_to(byte_offset);
     auto indirect_value = TRY(parse_indirect_value());
     VERIFY(indirect_value->index() == index);
@@ -419,7 +444,12 @@ PDFErrorOr<NonnullRefPtr<XRefTable>> DocumentParser::parse_xref_stream()
 
     auto number_of_object_entries = dict->get_value("Size").get<int>();
 
-    Vector<Tuple<int, int>> subsections;
+    struct Subsection {
+        int start;
+        int count;
+    };
+
+    Vector<Subsection> subsections;
     if (dict->contains(CommonNames::Index)) {
         auto index_array = TRY(dict->get_array(m_document, CommonNames::Index));
         if (index_array->size() % 2 != 0)
@@ -434,7 +464,7 @@ PDFErrorOr<NonnullRefPtr<XRefTable>> DocumentParser::parse_xref_stream()
 
     auto field_to_long = [](ReadonlyBytes field) -> long {
         long value = 0;
-        const u8 max = (field.size() - 1) * 8;
+        u8 const max = (field.size() - 1) * 8;
         for (size_t i = 0; i < field.size(); ++i) {
             value |= static_cast<long>(field[i]) << (max - (i * 8));
         }
@@ -443,13 +473,11 @@ PDFErrorOr<NonnullRefPtr<XRefTable>> DocumentParser::parse_xref_stream()
 
     size_t byte_index = 0;
 
-    for (auto const& subsection : subsections) {
-        auto start = subsection.get<0>();
-        auto count = subsection.get<1>();
+    for (auto [start, count] : subsections) {
         Vector<XRefEntry> entries;
 
         for (int i = 0; i < count; i++) {
-            Array<long, 3> fields;
+            Array<u64, 3> fields;
             for (size_t field_index = 0; field_index < 3; ++field_index) {
                 if (!field_sizes->at(field_index).has_u32())
                     return error("Malformed xref stream");
@@ -534,7 +562,7 @@ PDFErrorOr<NonnullRefPtr<XRefTable>> DocumentParser::parse_xref_table()
                 m_reader.move_by(2);
             }
 
-            auto offset = strtol(offset_string.characters(), nullptr, 10);
+            u64 offset = strtoll(offset_string.characters(), nullptr, 10);
             auto generation = strtol(generation_string.characters(), nullptr, 10);
 
             entries.append({ offset, static_cast<u16>(generation), letter == 'n' });
@@ -614,13 +642,13 @@ PDFErrorOr<DocumentParser::PageOffsetHintTable> DocumentParser::parse_page_offse
     size_t offset = 0;
 
     auto read_u32 = [&] {
-        u32 data = reinterpret_cast<const u32*>(hint_stream_bytes.data() + offset)[0];
+        u32 data = reinterpret_cast<u32 const*>(hint_stream_bytes.data() + offset)[0];
         offset += 4;
         return AK::convert_between_host_and_big_endian(data);
     };
 
     auto read_u16 = [&] {
-        u16 data = reinterpret_cast<const u16*>(hint_stream_bytes.data() + offset)[0];
+        u16 data = reinterpret_cast<u16 const*>(hint_stream_bytes.data() + offset)[0];
         offset += 2;
         return AK::convert_between_host_and_big_endian(data);
     };

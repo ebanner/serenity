@@ -7,6 +7,7 @@
 #include <AK/CharacterTypes.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/KeyboardEventPrototype.h>
 #include <LibWeb/UIEvents/KeyboardEvent.h>
 
 namespace Web::UIEvents {
@@ -727,7 +728,7 @@ KeyboardEvent::~KeyboardEvent() = default;
 void KeyboardEvent::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::KeyboardEventPrototype>(realm, "KeyboardEvent"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(KeyboardEvent);
 }
 
 }

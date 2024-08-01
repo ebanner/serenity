@@ -5,6 +5,7 @@
  */
 
 #include <AK/Hex.h>
+#include <LibPDF/CommonNames.h>
 #include <LibPDF/Document.h>
 #include <LibPDF/ObjectDerivatives.h>
 
@@ -136,6 +137,9 @@ ByteString StreamObject::to_byte_string(int indent) const
         percentage_ascii = ascii_count * 100 / bytes().size();
     bool is_mostly_text = percentage_ascii > 95;
 
+    if (dict()->contains(CommonNames::Subtype) && dict()->get_name(CommonNames::Subtype)->name() == "Image")
+        is_mostly_text = false;
+
     if (is_mostly_text) {
         for (size_t i = 0; i < bytes().size(); ++i) {
             auto c = bytes()[i];
@@ -150,15 +154,21 @@ ByteString StreamObject::to_byte_string(int indent) const
             }
         }
     } else {
-        auto string = encode_hex(bytes());
+        int const chars_per_line = 60;
+        int const bytes_per_line = chars_per_line / 2;
+        int const max_lines_to_print = 10;
+        int const max_bytes_to_print = max_lines_to_print * bytes_per_line;
+        auto string = encode_hex(bytes().trim(max_bytes_to_print));
         StringView view { string };
         while (view.length() > 60) {
-            builder.appendff("{}\n", view.substring_view(0, 60));
+            builder.appendff("{}\n", view.substring_view(0, chars_per_line));
             append_indent(builder, indent);
             view = view.substring_view(60);
         }
-
         builder.appendff("{}\n", view);
+
+        if (bytes().size() > max_bytes_to_print)
+            builder.appendff("... (and {} more bytes)\n", bytes().size() - max_bytes_to_print);
     }
 
     builder.append("endstream"sv);

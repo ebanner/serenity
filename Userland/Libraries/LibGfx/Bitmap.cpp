@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2024, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2022, Timothy Slater <tslater2006@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -23,9 +23,7 @@
 #include <LibGfx/ImageFormats/ImageDecoder.h>
 #include <LibGfx/ShareableBitmap.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
-#include <sys/mman.h>
 
 namespace Gfx {
 
@@ -93,7 +91,7 @@ Bitmap::Bitmap(BitmapFormat format, IntSize size, int scale_factor, BackingStore
     VERIFY(!size_would_overflow(format, size, scale_factor));
     VERIFY(m_data);
     VERIFY(backing_store.size_in_bytes == size_in_bytes());
-    m_needs_munmap = true;
+    m_data_is_malloced = true;
 }
 
 ErrorOr<NonnullRefPtr<Bitmap>> Bitmap::create_wrapper(BitmapFormat format, IntSize size, int scale_factor, size_t pitch, void* data)
@@ -147,7 +145,7 @@ ErrorOr<NonnullRefPtr<Bitmap>> Bitmap::load_from_file(NonnullOwnPtr<Core::File> 
 
 ErrorOr<NonnullRefPtr<Bitmap>> Bitmap::load_from_bytes(ReadonlyBytes bytes, Optional<IntSize> ideal_size, Optional<ByteString> mine_type)
 {
-    if (auto decoder = ImageDecoder::try_create_for_raw_bytes(bytes, mine_type)) {
+    if (auto decoder = TRY(ImageDecoder::try_create_for_raw_bytes(bytes, mine_type))) {
         auto frame = TRY(decoder->frame(0, ideal_size));
         if (auto& bitmap = frame.image)
             return bitmap.release_nonnull();
@@ -277,6 +275,19 @@ ErrorOr<NonnullRefPtr<Gfx::Bitmap>> Bitmap::clone() const
 
 ErrorOr<NonnullRefPtr<Gfx::Bitmap>> Bitmap::rotated(Gfx::RotationDirection rotation_direction) const
 {
+    if (rotation_direction == Gfx::RotationDirection::Flip) {
+        auto new_bitmap = TRY(Gfx::Bitmap::create(format(), { width(), height() }, scale()));
+
+        auto w = this->physical_width();
+        auto h = this->physical_height();
+        for (int i = 0; i < w; i++) {
+            for (int j = 0; j < h; j++)
+                new_bitmap->set_pixel(w - i - 1, h - j - 1, this->get_pixel(i, j));
+        }
+
+        return new_bitmap;
+    }
+
     auto new_bitmap = TRY(Gfx::Bitmap::create(this->format(), { height(), width() }, scale()));
 
     auto w = this->physical_width();
@@ -537,9 +548,8 @@ ErrorOr<NonnullRefPtr<Gfx::Bitmap>> Bitmap::inverted() const
 
 Bitmap::~Bitmap()
 {
-    if (m_needs_munmap) {
-        int rc = munmap(m_data, size_in_bytes());
-        VERIFY(rc == 0);
+    if (m_data_is_malloced) {
+        kfree_sized(m_data, size_in_bytes());
     }
     m_data = nullptr;
 }
@@ -552,57 +562,12 @@ void Bitmap::strip_alpha_channel()
     m_format = BitmapFormat::BGRx8888;
 }
 
-void Bitmap::set_mmap_name([[maybe_unused]] ByteString const& name)
-{
-    VERIFY(m_needs_munmap);
-#ifdef AK_OS_SERENITY
-    ::set_mmap_name(m_data, size_in_bytes(), name.characters());
-#endif
-}
-
 void Bitmap::fill(Color color)
 {
     for (int y = 0; y < physical_height(); ++y) {
         auto* scanline = this->scanline(y);
         fast_u32_fill(scanline, color.value(), physical_width());
     }
-}
-
-void Bitmap::set_volatile()
-{
-    if (m_volatile)
-        return;
-#ifdef AK_OS_SERENITY
-    int rc = madvise(m_data, size_in_bytes(), MADV_SET_VOLATILE);
-    if (rc < 0) {
-        perror("madvise(MADV_SET_VOLATILE)");
-        VERIFY_NOT_REACHED();
-    }
-#endif
-    m_volatile = true;
-}
-
-[[nodiscard]] bool Bitmap::set_nonvolatile(bool& was_purged)
-{
-    if (!m_volatile) {
-        was_purged = false;
-        return true;
-    }
-
-#ifdef AK_OS_SERENITY
-    int rc = madvise(m_data, size_in_bytes(), MADV_SET_NONVOLATILE);
-    if (rc < 0) {
-        if (errno == ENOMEM) {
-            was_purged = true;
-            return false;
-        }
-        perror("madvise(MADV_SET_NONVOLATILE)");
-        VERIFY_NOT_REACHED();
-    }
-    was_purged = rc != 0;
-#endif
-    m_volatile = false;
-    return true;
 }
 
 Gfx::ShareableBitmap Bitmap::to_shareable_bitmap() const
@@ -615,20 +580,17 @@ Gfx::ShareableBitmap Bitmap::to_shareable_bitmap() const
 
 ErrorOr<BackingStore> Bitmap::allocate_backing_store(BitmapFormat format, IntSize size, int scale_factor)
 {
+    if (size.is_empty())
+        return Error::from_string_literal("Gfx::Bitmap backing store size is empty");
+
     if (size_would_overflow(format, size, scale_factor))
         return Error::from_string_literal("Gfx::Bitmap backing store size overflow");
 
     auto const pitch = minimum_pitch(size.width() * scale_factor, format);
     auto const data_size_in_bytes = size_in_bytes(pitch, size.height() * scale_factor);
 
-    int map_flags = MAP_ANONYMOUS | MAP_PRIVATE;
-#ifdef AK_OS_SERENITY
-    map_flags |= MAP_PURGEABLE;
-    void* data = mmap_with_name(nullptr, data_size_in_bytes, PROT_READ | PROT_WRITE, map_flags, 0, 0, ByteString::formatted("GraphicsBitmap [{}]", size).characters());
-#else
-    void* data = mmap(nullptr, data_size_in_bytes, PROT_READ | PROT_WRITE, map_flags, -1, 0);
-#endif
-    if (data == MAP_FAILED)
+    void* data = kcalloc(1, data_size_in_bytes);
+    if (data == nullptr)
         return Error::from_errno(errno);
     return BackingStore { data, pitch, data_size_in_bytes };
 }

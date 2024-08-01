@@ -6,12 +6,14 @@
 
 #include <AK/Types.h>
 
+#include <Kernel/Arch/riscv64/CPU.h>
 #include <Kernel/Arch/riscv64/MMU.h>
 #include <Kernel/Arch/riscv64/PageDirectory.h>
 #include <Kernel/Arch/riscv64/SBI.h>
 #include <Kernel/Arch/riscv64/pre_init.h>
 #include <Kernel/Memory/MemoryManager.h>
 #include <Kernel/Sections.h>
+#include <LibDeviceTree/FlattenedDeviceTree.h>
 
 // These come from the linker script
 extern u8 page_tables_phys_start[];
@@ -150,20 +152,12 @@ static UNMAP_AFTER_INIT void build_mappings(PageBumpAllocator& allocator, u64* r
     auto start_of_kernel_range = VirtualAddress { bit_cast<FlatPtr>(+start_of_kernel_image) };
     auto end_of_kernel_range = VirtualAddress { bit_cast<FlatPtr>(+end_of_kernel_image) };
 
-    // FIXME: don't use the memory before `start` as the stack
-    auto start_of_stack_range = VirtualAddress { bit_cast<FlatPtr>(+start_of_kernel_image) }.offset(-64 * KiB);
-    auto end_of_stack_range = VirtualAddress { bit_cast<FlatPtr>(+start_of_kernel_image) };
-
     auto start_of_physical_kernel_range = PhysicalAddress { start_of_kernel_range.get() }.offset(-calculate_physical_to_link_time_address_offset());
-    auto start_of_physical_stack_range = PhysicalAddress { start_of_stack_range.get() }.offset(-calculate_physical_to_link_time_address_offset());
 
     // FIXME: dont map everything RWX
 
     // Map kernel into high virtual memory
     insert_entries_for_memory_range(allocator, root_table, start_of_kernel_range, end_of_kernel_range, start_of_physical_kernel_range, PageTableEntryBits::Readable | PageTableEntryBits::Writeable | PageTableEntryBits::Executable);
-
-    // Map the stack
-    insert_entries_for_memory_range(allocator, root_table, start_of_stack_range, end_of_stack_range, start_of_physical_stack_range, PageTableEntryBits::Readable | PageTableEntryBits::Writeable);
 }
 
 static UNMAP_AFTER_INIT void setup_kernel_page_directory(u64* root_table)
@@ -181,10 +175,12 @@ static UNMAP_AFTER_INIT void setup_kernel_page_directory(u64* root_table)
 }
 
 // This function has to fit into one page as it will be identity mapped.
-[[gnu::aligned(PAGE_SIZE)]] [[noreturn]] UNMAP_AFTER_INIT static void enable_paging(FlatPtr satp, u64* enable_paging_pte)
+[[gnu::aligned(PAGE_SIZE)]] [[noreturn]] UNMAP_AFTER_INIT static void enable_paging(BootInfo const& info, FlatPtr satp, u64* enable_paging_pte)
 {
-    // Switch current root page table to argument 0. This will immediately take effect, but we won't not crash as this function is identity mapped.
+    // Switch current root page table to argument 1. This will immediately take effect, but we won't not crash as this function is identity mapped.
     // Also, set up a temporary trap handler to catch any traps while switching page tables.
+    auto offset = calculate_physical_to_link_time_address_offset();
+    register FlatPtr a0 asm("a0") = bit_cast<FlatPtr>(&info);
     asm volatile(
         "   lla t0, 1f \n"
         "   csrw stvec, t0 \n"
@@ -218,20 +214,32 @@ static UNMAP_AFTER_INIT void setup_kernel_page_directory(u64* root_table)
         "   wfi \n"
         "   j 1b \n"
         :
-        : [satp] "r"(satp), [offset] "r"(calculate_physical_to_link_time_address_offset()), [enable_paging_pte] "r"(enable_paging_pte)
+        : "r"(a0), [satp] "r"(satp), [offset] "r"(offset), [enable_paging_pte] "r"(enable_paging_pte)
         : "t0");
 
     VERIFY_NOT_REACHED();
 }
 
-[[noreturn]] UNMAP_AFTER_INIT void init_page_tables_and_jump_to_init()
+[[noreturn]] UNMAP_AFTER_INIT void init_page_tables_and_jump_to_init(FlatPtr mhartid, PhysicalPtr fdt_phys_addr)
 {
     if (RISCV64::CSR::SATP::read().MODE != RISCV64::CSR::SATP::Mode::Bare)
         panic_without_mmu("Kernel booted with MMU enabled"sv);
 
+    // Copy the FDT to a known location
+    DeviceTree::FlattenedDeviceTreeHeader* fdt_header = bit_cast<DeviceTree::FlattenedDeviceTreeHeader*>(fdt_phys_addr);
+    u8* fdt_storage = bit_cast<u8*>(fdt_phys_addr);
+    if (fdt_header->totalsize > fdt_storage_size)
+        panic_without_mmu("Passed FDT is bigger than the internal storage"sv);
+    for (size_t o = 0; o < fdt_header->totalsize; o += 1) {
+        // FIXME: Maybe increase the IO size here
+        adjust_by_mapping_base(s_fdt_storage)[o] = fdt_storage[o];
+    }
+
     *adjust_by_mapping_base(&physical_to_virtual_offset) = calculate_physical_to_link_time_address_offset();
     *adjust_by_mapping_base(&kernel_mapping_base) = KERNEL_MAPPING_BASE;
     *adjust_by_mapping_base(&kernel_load_base) = KERNEL_MAPPING_BASE;
+
+    *adjust_by_mapping_base(&s_boot_info) = { .mhartid = mhartid, .fdt_phys_addr = fdt_phys_addr };
 
     PageBumpAllocator allocator(adjust_by_mapping_base(reinterpret_cast<u64*>(page_tables_phys_start)), adjust_by_mapping_base(reinterpret_cast<u64*>(page_tables_phys_end)));
     auto* root_table = allocator.take_page();
@@ -255,7 +263,7 @@ static UNMAP_AFTER_INIT void setup_kernel_page_directory(u64* root_table)
         .MODE = RISCV64::CSR::SATP::Mode::Sv39,
     };
 
-    enable_paging(bit_cast<FlatPtr>(satp), &enable_paging_level0_table[enable_paging_vpn_0]);
+    enable_paging(s_boot_info, bit_cast<FlatPtr>(satp), &enable_paging_level0_table[enable_paging_vpn_0]);
 }
 
 }

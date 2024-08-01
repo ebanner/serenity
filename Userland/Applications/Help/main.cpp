@@ -8,13 +8,13 @@
  */
 
 #include "MainWidget.h"
-#include <AK/URL.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/System.h>
 #include <LibGUI/Application.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/Window.h>
 #include <LibMain/Main.h>
+#include <LibURL/URL.h>
 
 using namespace Help;
 
@@ -63,7 +63,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     auto main_widget = TRY(MainWidget::try_create());
     window->set_main_widget(main_widget);
 
-    TRY(main_widget->initialize_fallibles(window));
+    TRY(main_widget->initialize(window));
     TRY(main_widget->set_start_page(query_parameters));
 
     window->show();

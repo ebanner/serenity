@@ -7,6 +7,28 @@
 // In a specially-named text section so that the linker script can put it first in .text.
 .section ".text.first"
 
+// Make the kernel bootable using U-Boot's booti command by adding a linux header (https://www.kernel.org/doc/html/latest/arch/riscv/boot-image-header.html).
+// Booting via booti causes U-Boot to pass us the boot hart ID and a flattened devicetree (https://www.kernel.org/doc/html/latest/arch/riscv/boot.html).
+linux_header:
+.option push
+.option norvc
+  j start                                   // u32 code0
+  j start                                   // u32 code1
+.option pop
+
+  // This offset is needed, as otherwise U-Boot will try to load us at the same address where OpenSBI is loaded.
+  // The value is the same that Linux uses.
+  .dword 0x400000                           // u64 text_offset
+
+  .dword end_of_kernel_image - linux_header // u64 image_size
+  .dword 0                                  // u64 flags
+  .word 2                                   // u32 version
+  .word 0                                   // u32 res1
+  .dword 0                                  // u64 res2
+  .ascii "RISCV\0\0\0"                      // u64 magic (deprecated)
+  .ascii "RSC\x5"                           // u32 magic2
+  .word 0                                   // u32 res3
+
 .global start
 .type start, @function
 start:
@@ -16,8 +38,8 @@ start:
   // Don't touch a0/a1 as we expect those registers to contain the hart ID
   // and a pointer to the Flattened Fevice Tree.
 
-  // Set sstatus to a known state (which includes disabling supervisor interrupts).
-  csrw sstatus, zero
+  // Clear sstatus.SIE, which disables all interrupts in supervisor mode.
+  csrci sstatus, 1 << 1
 
   // Also, disable all interrupts sources and mark them as non-pending.
   csrw sie, zero
@@ -35,8 +57,8 @@ Lclear_bss_loop:
   bltu t0, t1, Lclear_bss_loop
 Lclear_bss_done:
 
-  // Let the stack start before .text for now.
-  lla sp, start
+  // Set the stack pointer register to the location defined in the linker script.
+  lla sp, end_of_initial_stack
 
   // Zero all registers except sp, a0 and a1.
   li ra, 0
@@ -70,5 +92,9 @@ Lclear_bss_done:
   li t4, 0
   li t5, 0
   li t6, 0
+
+  // The trap handler expects sscratch to be zero if we are in supervisor mode.
+  // sscratch contains the kernel stack pointer if we are in user mode.
+  csrw sscratch, zero
 
   tail pre_init

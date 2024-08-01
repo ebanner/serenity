@@ -8,7 +8,6 @@
 
 #include "MainWidget.h"
 #include "ViewWidget.h"
-#include <AK/URL.h>
 #include <LibConfig/Client.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/System.h>
@@ -32,6 +31,7 @@
 #include <LibGfx/Palette.h>
 #include <LibGfx/Rect.h>
 #include <LibMain/Main.h>
+#include <LibURL/URL.h>
 #include <serenity.h>
 #include <string.h>
 
@@ -57,7 +57,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     // TRY(Core::System::unveil("/res", "r"));
     // TRY(Core::System::unveil(nullptr, nullptr));
 
-    auto app_icon = GUI::Icon::default_icon("filetype-image"sv);
+    auto app_icon = GUI::Icon::default_icon("app-image-viewer"sv);
 
     StringView path;
     Core::ArgsParser args_parser;
@@ -106,7 +106,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             return;
 
         auto value = result.release_value();
-        widget.open_file(value.filename(), value.stream());
+        widget.open_file(MUST(String::from_byte_string(value.filename())), value.stream());
 
         for (size_t i = 1; i < urls.size(); ++i) {
             Desktop::Launcher::open(URL::create_with_file_scheme(urls[i].serialize_path().characters()), "/bin/ImageViewer");
@@ -130,7 +130,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
                 return;
 
             auto value = result.release_value();
-            widget.open_file(value.filename(), value.stream());
+            widget.open_file(MUST(String::from_byte_string(value.filename())), value.stream());
         });
 
     auto delete_action = GUI::CommonActions::make_delete_action(
@@ -318,7 +318,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             return;
 
         auto value = result.release_value();
-        widget.open_file(value.filename(), value.stream());
+        widget.open_file(MUST(String::from_byte_string(value.filename())), value.stream());
     });
 
     file_menu->add_action(quit_action);
@@ -380,7 +380,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             return 1;
 
         auto value = result.release_value();
-        widget.open_file(value.filename(), value.stream());
+        widget.open_file(MUST(String::from_byte_string(value.filename())), value.stream());
     } else {
         widget.clear();
     }

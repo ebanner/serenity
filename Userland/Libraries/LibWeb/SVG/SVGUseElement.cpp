@@ -5,11 +5,13 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/SVGUseElementPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Layout/Box.h>
+#include <LibWeb/Layout/SVGGraphicsBox.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
@@ -27,7 +29,7 @@ SVGUseElement::SVGUseElement(DOM::Document& document, DOM::QualifiedName qualifi
 void SVGUseElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SVGUseElementPrototype>(realm, "SVGUseElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGUseElement);
 
     // The shadow tree is open (inspectable by script), but read-only.
     auto shadow_root = heap().allocate<DOM::ShadowRoot>(realm, document(), *this, Bindings::ShadowRootMode::Open);
@@ -57,8 +59,7 @@ void SVGUseElement::attribute_changed(FlyString const& name, Optional<String> co
         m_x = AttributeParser::parse_coordinate(value.value_or(String {}));
     } else if (name == SVG::AttributeNames::y) {
         m_y = AttributeParser::parse_coordinate(value.value_or(String {}));
-    } else if (name == SVG::AttributeNames::href) {
-        // FIXME: Support the xlink:href attribute as a fallback
+    } else if (name == SVG::AttributeNames::href || name == "xlink:href"_fly_string) {
         m_referenced_id = parse_id_from_href(value.value_or(String {}));
 
         clone_element_tree_as_our_shadow_tree(referenced_element());
@@ -125,12 +126,12 @@ JS::GCPtr<DOM::Element> SVGUseElement::referenced_element()
 // https://svgwg.org/svg2-draft/struct.html#UseShadowTree
 void SVGUseElement::clone_element_tree_as_our_shadow_tree(Element* to_clone) const
 {
-    shadow_root()->remove_all_children();
+    const_cast<DOM::ShadowRoot&>(*shadow_root()).remove_all_children();
 
     if (to_clone && is_valid_reference_element(to_clone)) {
         // The ‘use’ element references another element, a copy of which is rendered in place of the ‘use’ in the document.
-        auto cloned_reference_node = to_clone->clone_node(nullptr, true);
-        shadow_root()->append_child(cloned_reference_node).release_value_but_fixme_should_propagate_errors();
+        auto cloned_reference_node = MUST(to_clone->clone_node(nullptr, true));
+        const_cast<DOM::ShadowRoot&>(*shadow_root()).append_child(cloned_reference_node).release_value_but_fixme_should_propagate_errors();
     }
 }
 
@@ -163,18 +164,20 @@ JS::NonnullGCPtr<SVGAnimatedLength> SVGUseElement::y() const
 
 JS::NonnullGCPtr<SVGAnimatedLength> SVGUseElement::width() const
 {
-    TODO();
+    // FIXME: Implement this properly.
+    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
 }
 
 JS::NonnullGCPtr<SVGAnimatedLength> SVGUseElement::height() const
 {
-    TODO();
+    // FIXME: Implement this properly.
+    return SVGAnimatedLength::create(realm(), SVGLength::create(realm(), 0, 0), SVGLength::create(realm(), 0, 0));
 }
 
 // https://svgwg.org/svg2-draft/struct.html#TermInstanceRoot
 JS::GCPtr<SVGElement> SVGUseElement::instance_root() const
 {
-    return shadow_root()->first_child_of_type<SVGElement>();
+    return const_cast<DOM::ShadowRoot&>(*shadow_root()).first_child_of_type<SVGElement>();
 }
 
 JS::GCPtr<SVGElement> SVGUseElement::animated_instance_root() const
@@ -184,7 +187,7 @@ JS::GCPtr<SVGElement> SVGUseElement::animated_instance_root() const
 
 JS::GCPtr<Layout::Node> SVGUseElement::create_layout_node(NonnullRefPtr<CSS::StyleProperties> style)
 {
-    return heap().allocate_without_realm<Layout::Box>(document(), this, move(style));
+    return heap().allocate_without_realm<Layout::SVGGraphicsBox>(document(), *this, move(style));
 }
 
 }

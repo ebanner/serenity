@@ -8,6 +8,7 @@
 #include <AK/Random.h>
 #include <AK/StringBuilder.h>
 #include <LibJS/Runtime/TypedArray.h>
+#include <LibWeb/Bindings/CryptoPrototype.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Crypto/Crypto.h>
@@ -33,7 +34,7 @@ Crypto::~Crypto() = default;
 void Crypto::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CryptoPrototype>(realm, "Crypto"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Crypto);
     m_subtle = SubtleCrypto::create(realm);
 }
 

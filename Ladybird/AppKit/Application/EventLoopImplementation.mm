@@ -23,6 +23,17 @@ struct ThreadData {
         return s_thread_data;
     }
 
+    Core::Notifier& notifier_by_fd(int fd)
+    {
+        for (auto notifier : notifiers) {
+            if (notifier.key->fd() == fd)
+                return *notifier.key;
+        }
+
+        // If we didn't have a notifier for the provided FD, it should have been unregistered.
+        VERIFY_NOT_REACHED();
+    }
+
     IDAllocator timer_id_allocator;
     HashMap<int, CFRunLoopTimerRef> timers;
     HashMap<Core::Notifier*, CFRunLoopSourceRef> notifiers;
@@ -48,7 +59,7 @@ NonnullOwnPtr<Core::EventLoopImplementation> CFEventLoopManager::make_implementa
     return CFEventLoopImplementation::create();
 }
 
-int CFEventLoopManager::register_timer(Core::EventReceiver& receiver, int interval_milliseconds, bool should_reload, Core::TimerShouldFireWhenNotVisible should_fire_when_not_visible)
+intptr_t CFEventLoopManager::register_timer(Core::EventReceiver& receiver, int interval_milliseconds, bool should_reload, Core::TimerShouldFireWhenNotVisible should_fire_when_not_visible)
 {
     auto& thread_data = ThreadData::the();
 
@@ -72,7 +83,7 @@ int CFEventLoopManager::register_timer(Core::EventReceiver& receiver, int interv
                 }
             }
 
-            Core::TimerEvent event(timer_id);
+            Core::TimerEvent event;
             receiver->dispatch_event(event);
         });
 
@@ -82,23 +93,20 @@ int CFEventLoopManager::register_timer(Core::EventReceiver& receiver, int interv
     return timer_id;
 }
 
-bool CFEventLoopManager::unregister_timer(int timer_id)
+void CFEventLoopManager::unregister_timer(intptr_t timer_id)
 {
     auto& thread_data = ThreadData::the();
-    thread_data.timer_id_allocator.deallocate(timer_id);
+    thread_data.timer_id_allocator.deallocate(static_cast<int>(timer_id));
 
-    if (auto timer = thread_data.timers.take(timer_id); timer.has_value()) {
-        CFRunLoopTimerInvalidate(*timer);
-        CFRelease(*timer);
-        return true;
-    }
-
-    return false;
+    auto timer = thread_data.timers.take(static_cast<int>(timer_id));
+    VERIFY(timer.has_value());
+    CFRunLoopTimerInvalidate(*timer);
+    CFRelease(*timer);
 }
 
-static void socket_notifier(CFSocketRef socket, CFSocketCallBackType notification_type, CFDataRef, void const*, void* info)
+static void socket_notifier(CFSocketRef socket, CFSocketCallBackType notification_type, CFDataRef, void const*, void*)
 {
-    auto& notifier = *reinterpret_cast<Core::Notifier*>(info);
+    auto& notifier = ThreadData::the().notifier_by_fd(CFSocketGetNative(socket));
 
     // This socket callback is not quite re-entrant. If Core::Notifier::dispatch_event blocks, e.g.
     // to wait upon a Core::Promise, this socket will not receive any more notifications until that
@@ -106,7 +114,7 @@ static void socket_notifier(CFSocketRef socket, CFSocketCallBackType notificatio
     // before dispatching the event, which allows it to be triggered again.
     CFSocketEnableCallBacks(socket, notification_type);
 
-    Core::NotifierActivationEvent event(notifier.fd());
+    Core::NotifierActivationEvent event(notifier.fd(), notifier.type());
     notifier.dispatch_event(event);
 
     // This manual process of enabling the callbacks also seems to require waking the event loop,
@@ -130,7 +138,7 @@ void CFEventLoopManager::register_notifier(Core::Notifier& notifier)
         break;
     }
 
-    CFSocketContext context { .version = 0, .info = &notifier, .retain = nullptr, .release = nullptr, .copyDescription = nullptr };
+    CFSocketContext context { .version = 0, .info = nullptr, .retain = nullptr, .release = nullptr, .copyDescription = nullptr };
     auto* socket = CFSocketCreateWithNative(kCFAllocatorDefault, notifier.fd(), notification_type, &socket_notifier, &context);
 
     CFOptionFlags sockopt = CFSocketGetSocketFlags(socket);
@@ -180,11 +188,7 @@ size_t CFEventLoopImplementation::pump(PumpMode mode)
                                        dequeue:YES];
 
     while (event) {
-        if (event.type == NSEventTypeApplicationDefined) {
-            m_thread_event_queue.process();
-        } else {
-            [NSApp sendEvent:event];
-        }
+        [NSApp sendEvent:event];
 
         event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                    untilDate:nil

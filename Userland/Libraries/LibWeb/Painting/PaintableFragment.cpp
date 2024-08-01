@@ -7,6 +7,7 @@
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/TextPaintable.h>
 
 namespace Web::Painting {
 
@@ -24,19 +25,20 @@ PaintableFragment::PaintableFragment(Layout::LineBoxFragment const& fragment)
 CSSPixelRect const PaintableFragment::absolute_rect() const
 {
     CSSPixelRect rect { {}, size() };
-    if (m_layout_node->containing_block() && m_layout_node->containing_block()->paintable_box())
-        rect.set_location(m_layout_node->containing_block()->paintable_box()->absolute_position());
+    auto const* containing_block = paintable().containing_block();
+    if (containing_block)
+        rect.set_location(containing_block->absolute_position());
     rect.translate_by(offset());
     return rect;
 }
 
 int PaintableFragment::text_index_at(CSSPixels x) const
 {
-    if (!is<Layout::TextNode>(*m_layout_node))
+    if (!is<TextPaintable>(paintable()))
         return 0;
     auto& layout_text = verify_cast<Layout::TextNode>(layout_node());
     auto& font = layout_text.first_available_font();
-    Utf8View view(layout_text.text_for_rendering().bytes_as_string_view().substring_view(m_start, m_length));
+    Utf8View view(string_view());
 
     CSSPixels relative_x = x - absolute_rect().x();
     CSSPixels glyph_spacing = font.glyph_spacing();
@@ -60,16 +62,13 @@ int PaintableFragment::text_index_at(CSSPixels x) const
 
 CSSPixelRect PaintableFragment::selection_rect(Gfx::Font const& font) const
 {
-    if (layout_node().selection_state() == Layout::Node::SelectionState::None)
+    if (paintable().selection_state() == Paintable::SelectionState::None)
         return {};
 
-    if (layout_node().selection_state() == Layout::Node::SelectionState::Full)
+    if (paintable().selection_state() == Paintable::SelectionState::Full)
         return absolute_rect();
 
-    if (!is<Layout::TextNode>(layout_node()))
-        return {};
-
-    auto selection = layout_node().root().selection();
+    auto selection = paintable().document().get_selection();
     if (!selection)
         return {};
     auto range = selection->range();
@@ -80,10 +79,9 @@ CSSPixelRect PaintableFragment::selection_rect(Gfx::Font const& font) const
     auto const start_index = static_cast<unsigned>(m_start);
     auto const end_index = static_cast<unsigned>(m_start) + static_cast<unsigned>(m_length);
 
-    auto& layout_text = verify_cast<Layout::TextNode>(layout_node());
-    auto text = layout_text.text_for_rendering().bytes_as_string_view().substring_view(m_start, m_length);
+    auto text = string_view();
 
-    if (layout_node().selection_state() == Layout::Node::SelectionState::StartAndEnd) {
+    if (paintable().selection_state() == Paintable::SelectionState::StartAndEnd) {
         // we are in the start/end node (both the same)
         if (start_index > range->end_offset())
             return {};
@@ -104,7 +102,7 @@ CSSPixelRect PaintableFragment::selection_rect(Gfx::Font const& font) const
 
         return rect;
     }
-    if (layout_node().selection_state() == Layout::Node::SelectionState::Start) {
+    if (paintable().selection_state() == Paintable::SelectionState::Start) {
         // we are in the start node
         if (end_index < range->start_offset())
             return {};
@@ -120,7 +118,7 @@ CSSPixelRect PaintableFragment::selection_rect(Gfx::Font const& font) const
 
         return rect;
     }
-    if (layout_node().selection_state() == Layout::Node::SelectionState::End) {
+    if (paintable().selection_state() == Paintable::SelectionState::End) {
         // we are in the end node
         if (start_index > range->end_offset())
             return {};
@@ -137,6 +135,13 @@ CSSPixelRect PaintableFragment::selection_rect(Gfx::Font const& font) const
         return rect;
     }
     return {};
+}
+
+StringView PaintableFragment::string_view() const
+{
+    if (!is<TextPaintable>(paintable()))
+        return {};
+    return static_cast<TextPaintable const&>(paintable()).text_for_rendering().bytes_as_string_view().substring_view(m_start, m_length);
 }
 
 }

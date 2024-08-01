@@ -147,7 +147,7 @@ static ErrorOr<Vector<Color>> decode_color_table(Stream& stream, ColorEncoding e
             auto red = (color >> (6 + 5)) & 0x1f;
             auto green = (color >> 5) & 0x3f;
             auto blue = (color >> 0) & 0x1f;
-            return Color((red * 255 + 15) / 31, (green * 255 + 31), (blue * 255 + 15) / 31);
+            return Color((red * 255 + 15) / 31, (green * 255 + 31) / 63, (blue * 255 + 15) / 31);
         }
         case ColorEncoding::RGBAF32: {
             auto red = TRY(stream.read_value<LittleEndian<f32>>());
@@ -279,10 +279,10 @@ public:
                     path.line_to(TRY(read_point()));
                     break;
                 case PathCommand::HorizontalLine:
-                    path.line_to({ TRY(read_unit()), path.segments().last()->point().y() });
+                    path.line_to({ TRY(read_unit()), path.last_point().y() });
                     break;
                 case PathCommand::VerticalLine:
-                    path.line_to({ path.segments().last()->point().x(), TRY(read_unit()) });
+                    path.line_to({ path.last_point().x(), TRY(read_unit()) });
                     break;
                 case PathCommand::CubicBezier: {
                     auto control_0 = TRY(read_point());
@@ -364,7 +364,7 @@ ErrorOr<NonnullRefPtr<TinyVGDecodedImageData>> TinyVGDecodedImageData::decode(St
     if (header.version != 1)
         return Error::from_string_literal("Invalid TinyVG: Unsupported version");
 
-    auto const& color_table = TRY(decode_color_table(stream, header.color_encoding, header.color_count));
+    auto color_table = TRY(decode_color_table(stream, header.color_encoding, header.color_count));
     TinyVGReader reader { stream, header, color_table.span() };
 
     auto rectangle_to_path = [](FloatRect const& rect) -> Path {
@@ -549,6 +549,8 @@ TinyVGImageDecoderPlugin::TinyVGImageDecoderPlugin(ReadonlyBytes bytes)
     : m_context { make<TinyVGLoadingContext>(FixedMemoryStream { bytes }) }
 {
 }
+
+TinyVGImageDecoderPlugin::~TinyVGImageDecoderPlugin() = default;
 
 ErrorOr<NonnullOwnPtr<ImageDecoderPlugin>> TinyVGImageDecoderPlugin::create(ReadonlyBytes bytes)
 {

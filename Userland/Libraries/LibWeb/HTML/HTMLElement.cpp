@@ -7,8 +7,10 @@
 #include <AK/StringBuilder.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
+#include <LibWeb/Bindings/HTMLElementPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/IDLEventListener.h>
+#include <LibWeb/DOM/LiveNodeList.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/DOMStringMap.h>
@@ -19,6 +21,7 @@
 #include <LibWeb/HTML/HTMLBaseElement.h>
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
+#include <LibWeb/HTML/HTMLLabelElement.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/HTML/Window.h>
@@ -31,6 +34,7 @@
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/FocusEvent.h>
 #include <LibWeb/UIEvents/MouseEvent.h>
+#include <LibWeb/UIEvents/PointerEvent.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -48,15 +52,21 @@ HTMLElement::~HTMLElement() = default;
 void HTMLElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLElementPrototype>(realm, "HTMLElement"_fly_string));
-
-    m_dataset = DOMStringMap::create(*this);
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLElement);
 }
 
 void HTMLElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_dataset);
+    visitor.visit(m_labels);
+}
+
+JS::NonnullGCPtr<DOMStringMap> HTMLElement::dataset()
+{
+    if (!m_dataset)
+        m_dataset = DOMStringMap::create(*this);
+    return *m_dataset;
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#dom-dir
@@ -91,6 +101,19 @@ bool HTMLElement::is_editable() const
     default:
         VERIFY_NOT_REACHED();
     }
+}
+
+bool HTMLElement::is_focusable() const
+{
+    return m_content_editable_state == ContentEditableState::True;
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-iscontenteditable
+bool HTMLElement::is_content_editable() const
+{
+    // The isContentEditable IDL attribute, on getting, must return true if the element is either an editing host or
+    // editable, and false otherwise.
+    return is_editable();
 }
 
 StringView HTMLElement::content_editable() const
@@ -132,8 +155,18 @@ void HTMLElement::set_inner_text(StringView text)
     set_needs_style_update(true);
 }
 
-String HTMLElement::inner_text()
+// https://html.spec.whatwg.org/multipage/dom.html#the-innertext-idl-attribute:dom-outertext-2
+WebIDL::ExceptionOr<void> HTMLElement::set_outer_text(String)
 {
+    dbgln("FIXME: Implement HTMLElement::set_outer_text()");
+    return {};
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#get-the-text-steps
+String HTMLElement::get_the_text_steps()
+{
+    // FIXME: Implement this according to spec.
+
     StringBuilder builder;
 
     // innerText for element being rendered takes visibility into account, so force a layout and then walk the layout tree.
@@ -153,6 +186,20 @@ String HTMLElement::inner_text()
     recurse(*layout_node());
 
     return MUST(builder.to_string());
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#dom-innertext
+String HTMLElement::inner_text()
+{
+    // The innerText and outerText getter steps are to return the result of running get the text steps with this.
+    return get_the_text_steps();
+}
+
+// https://html.spec.whatwg.org/multipage/dom.html#dom-outertext
+String HTMLElement::outer_text()
+{
+    // The innerText and outerText getter steps are to return the result of running get the text steps with this.
+    return get_the_text_steps();
 }
 
 // https://www.w3.org/TR/cssom-view-1/#dom-htmlelement-offsetparent
@@ -192,7 +239,8 @@ JS::GCPtr<DOM::Element> HTMLElement::offset_parent() const
             return const_cast<Element*>(ancestor);
     }
 
-    VERIFY_NOT_REACHED();
+    // 3. Return null.
+    return nullptr;
 }
 
 // https://www.w3.org/TR/cssom-view-1/#dom-htmlelement-offsettop
@@ -366,8 +414,7 @@ bool HTMLElement::fire_a_synthetic_pointer_event(FlyString const& type, DOM::Ele
 {
     // 1. Let event be the result of creating an event using PointerEvent.
     // 2. Initialize event's type attribute to e.
-    // FIXME: Actually create a PointerEvent!
-    auto event = UIEvents::MouseEvent::create(realm(), type);
+    auto event = UIEvents::PointerEvent::create(realm(), type);
 
     // 3. Initialize event's bubbles and cancelable attributes to true.
     event->set_bubbles(true);
@@ -392,6 +439,25 @@ bool HTMLElement::fire_a_synthetic_pointer_event(FlyString const& type, DOM::Ele
     return target.dispatch_event(event);
 }
 
+// https://html.spec.whatwg.org/multipage/forms.html#dom-lfe-labels-dev
+JS::GCPtr<DOM::NodeList> HTMLElement::labels()
+{
+    // Labelable elements and all input elements have a live NodeList object associated with them that represents the list of label elements, in tree order,
+    // whose labeled control is the element in question. The labels IDL attribute of labelable elements that are not form-associated custom elements,
+    // and the labels IDL attribute of input elements, on getting, must return that NodeList object, and that same value must always be returned,
+    // unless this element is an input element whose type attribute is in the Hidden state, in which case it must instead return null.
+    if (!is_labelable())
+        return {};
+
+    if (!m_labels) {
+        m_labels = DOM::LiveNodeList::create(realm(), root(), DOM::LiveNodeList::Scope::Descendants, [&](auto& node) {
+            return is<HTMLLabelElement>(node) && verify_cast<HTMLLabelElement>(node).control() == this;
+        });
+    }
+
+    return m_labels;
+}
+
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-click
 void HTMLElement::click()
 {
@@ -404,7 +470,7 @@ void HTMLElement::click()
     // 3. Set this element's click in progress flag.
     m_click_in_progress = true;
 
-    // FIXME: 4. Fire a synthetic pointer event named click at this element, with the not trusted flag set.
+    // 4. Fire a synthetic pointer event named click at this element, with the not trusted flag set.
     fire_a_synthetic_pointer_event(HTML::EventNames::click, *this, true);
 
     // 5. Unset this element's click in progress flag.
@@ -540,6 +606,23 @@ TokenizedFeature::NoOpener HTMLElement::get_an_elements_noopener(StringView targ
 
     // 3. Return false.
     return TokenizedFeature::NoOpener::No;
+}
+
+void HTMLElement::did_receive_focus()
+{
+    if (m_content_editable_state != ContentEditableState::True)
+        return;
+    auto navigable = document().navigable();
+    if (!navigable)
+        return;
+    navigable->set_cursor_position(DOM::Position::create(realm(), *this, 0));
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#dom-accesskeylabel
+String HTMLElement::access_key_label() const
+{
+    dbgln("FIXME: Implement HTMLElement::access_key_label()");
+    return String {};
 }
 
 }

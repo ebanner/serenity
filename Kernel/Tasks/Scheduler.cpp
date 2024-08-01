@@ -268,9 +268,14 @@ void Scheduler::context_switch(Thread* thread)
         return;
 
     // If the last process hasn't blocked (still marked as running),
-    // mark it as runnable for the next round.
-    if (from_thread->state() == Thread::State::Running)
-        from_thread->set_state(Thread::State::Runnable);
+    // mark it as runnable for the next round, unless it's supposed
+    // to be stopped, in which case just mark it as such.
+    if (from_thread->state() == Thread::State::Running) {
+        if (from_thread->should_be_stopped())
+            from_thread->set_state(Thread::State::Stopped);
+        else
+            from_thread->set_state(Thread::State::Runnable);
+    }
 
 #ifdef LOG_EVERY_CONTEXT_SWITCH
     auto const msg = "Scheduler[{}]: {} -> {} [prio={}] {:p}";
@@ -547,12 +552,7 @@ void dump_thread_list(bool with_stack_traces)
         });
 #endif
         if (with_stack_traces) {
-            auto trace_or_error = thread.backtrace();
-            if (!trace_or_error.is_error()) {
-                auto trace = trace_or_error.release_value();
-                dbgln("Backtrace:");
-                kernelputstr(trace->characters(), trace->length());
-            }
+            thread.print_backtrace();
         }
         return IterationDecision::Continue;
     });

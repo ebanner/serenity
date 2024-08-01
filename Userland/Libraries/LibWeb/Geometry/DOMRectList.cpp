@@ -5,6 +5,7 @@
  */
 
 #include <LibJS/Heap/Handle.h>
+#include <LibWeb/Bindings/DOMRectListPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/Geometry/DOMRectList.h>
@@ -34,14 +35,13 @@ DOMRectList::~DOMRectList() = default;
 void DOMRectList::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::DOMRectListPrototype>(realm, "DOMRectList"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(DOMRectList);
 }
 
 void DOMRectList::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    for (auto& rect : m_rects)
-        visitor.visit(rect);
+    visitor.visit(m_rects);
 }
 
 // https://drafts.fxtf.org/geometry-1/#dom-domrectlist-length

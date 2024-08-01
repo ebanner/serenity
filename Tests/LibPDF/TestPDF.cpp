@@ -6,7 +6,10 @@
 
 #include <AK/ByteString.h>
 #include <AK/Forward.h>
+#include <AK/LexicalPath.h>
 #include <LibCore/MappedFile.h>
+#include <LibCore/ResourceImplementationFile.h>
+#include <LibCore/System.h>
 #include <LibGfx/Bitmap.h>
 #include <LibPDF/CommonNames.h>
 #include <LibPDF/Document.h>
@@ -116,6 +119,18 @@ TEST_CASE(encrypted_object_stream)
     auto info_dict = MUST(document->info_dict()).value();
     EXPECT_EQ(MUST(info_dict.author()).value(), "van der Knijff");
     EXPECT_EQ(MUST(info_dict.creator()).value(), "Acrobat PDFMaker 9.1 voor Word");
+}
+
+TEST_CASE(resolve_indirect_reference_during_parsing)
+{
+    auto file = MUST(Core::MappedFile::map("jbig2-globals.pdf"sv));
+    auto document = MUST(PDF::Document::create(file->bytes()));
+    MUST(document->initialize());
+    EXPECT_EQ(document->get_page_count(), 1U);
+
+    auto jbig2_stream_value = MUST(document->get_or_load_value(5));
+    auto jbig2_stream = MUST(document->resolve_to<PDF::StreamObject>(jbig2_stream_value));
+    EXPECT_EQ(jbig2_stream->bytes().size(), 20'000U);
 }
 
 TEST_CASE(malformed_pdf_document)
@@ -293,6 +308,12 @@ TEST_CASE(postscript)
 
 TEST_CASE(render)
 {
+#if !defined(AK_OS_SERENITY)
+    // Get from Build/lagom/bin/TestPDF to Build/lagom/Root/res.
+    auto source_root = LexicalPath(MUST(Core::System::current_executable_path())).parent().parent().string();
+    Core::ResourceImplementation::install(make<Core::ResourceImplementationFile>(MUST(String::formatted("{}/Root/res", source_root))));
+#endif
+
     auto file = MUST(Core::MappedFile::map("colorspaces.pdf"sv));
     auto document = MUST(PDF::Document::create(file->bytes()));
     MUST(document->initialize());

@@ -8,11 +8,16 @@
 
 #pragma once
 
+#include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/FileAPI/FileList.h>
+#include <LibWeb/HTML/ColorPickerUpdateState.h>
+#include <LibWeb/HTML/FileFilter.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
+#include <LibWeb/Layout/ImageProvider.h>
 #include <LibWeb/WebIDL/DOMException.h>
+#include <LibWeb/WebIDL/Types.h>
 
 namespace Web::HTML {
 
@@ -44,7 +49,8 @@ namespace Web::HTML {
 class HTMLInputElement final
     : public HTMLElement
     , public FormAssociatedElement
-    , public DOM::EditableTextNodeOwner {
+    , public DOM::EditableTextNodeOwner
+    , public Layout::ImageProvider {
     WEB_PLATFORM_OBJECT(HTMLInputElement, HTMLElement);
     JS_DECLARE_ALLOCATOR(HTMLInputElement);
     FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLInputElement)
@@ -53,6 +59,7 @@ public:
     virtual ~HTMLInputElement() override;
 
     virtual JS::GCPtr<Layout::Node> create_layout_node(NonnullRefPtr<CSS::StyleProperties>) override;
+    virtual void adjust_computed_style(CSS::StyleProperties&) override;
 
     enum class TypeAttributeState {
 #define __ENUMERATE_HTML_INPUT_TYPE_ATTRIBUTE(_, state) state,
@@ -72,7 +79,7 @@ public:
     void commit_pending_changes();
 
     String placeholder() const;
-    Optional<ByteString> placeholder_value() const;
+    Optional<String> placeholder_value() const;
 
     bool checked() const { return m_checked; }
     enum class ChangeSource {
@@ -89,17 +96,33 @@ public:
 
     bool is_mutable() const { return m_is_mutable; }
 
-    void did_pick_color(Optional<Color> picked_color);
+    void did_pick_color(Optional<Color> picked_color, ColorPickerUpdateState state);
+
+    void did_select_files(Span<SelectedFile> selected_files);
 
     JS::GCPtr<FileAPI::FileList> files();
     void set_files(JS::GCPtr<FileAPI::FileList>);
+
+    FileFilter parse_accept_attribute() const;
 
     // NOTE: User interaction
     // https://html.spec.whatwg.org/multipage/input.html#update-the-file-selection
     void update_the_file_selection(JS::NonnullGCPtr<FileAPI::FileList>);
 
+    WebIDL::Long max_length() const;
+    WebIDL::ExceptionOr<void> set_max_length(WebIDL::Long);
+
+    WebIDL::Long min_length() const;
+    WebIDL::ExceptionOr<void> set_min_length(WebIDL::Long);
+
     unsigned size() const;
     WebIDL::ExceptionOr<void> set_size(unsigned value);
+
+    struct SelectedCoordinate {
+        int x { 0 };
+        int y { 0 };
+    };
+    SelectedCoordinate selected_coordinate() const { return m_selected_coordinate; }
 
     JS::Object* value_as_date() const;
     WebIDL::ExceptionOr<void> set_value_as_date(Optional<JS::Handle<JS::Object>> const&);
@@ -107,8 +130,8 @@ public:
     double value_as_number() const;
     WebIDL::ExceptionOr<void> set_value_as_number(double value);
 
-    WebIDL::ExceptionOr<void> step_up(long n = 1);
-    WebIDL::ExceptionOr<void> step_down(long n = 1);
+    WebIDL::ExceptionOr<void> step_up(WebIDL::Long n = 1);
+    WebIDL::ExceptionOr<void> step_down(WebIDL::Long n = 1);
 
     WebIDL::ExceptionOr<bool> check_validity();
     WebIDL::ExceptionOr<bool> report_validity();
@@ -120,14 +143,11 @@ public:
     WebIDL::ExceptionOr<void> show_picker();
 
     // ^DOM::EditableTextNodeOwner
-    virtual void did_edit_text_node(Badge<BrowsingContext>) override;
+    virtual void did_edit_text_node(Badge<Navigable>) override;
 
     // ^EventTarget
     // https://html.spec.whatwg.org/multipage/interaction.html#the-tabindex-attribute:the-input-element
     virtual bool is_focusable() const override { return m_type != TypeAttributeState::Hidden; }
-
-    // ^HTMLElement
-    virtual void attribute_changed(FlyString const&, Optional<String> const&) override;
 
     // ^FormAssociatedElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-listed
@@ -152,6 +172,7 @@ public:
 
     virtual void form_associated_element_was_inserted() override;
     virtual void form_associated_element_was_removed(DOM::Node*) override;
+    virtual void form_associated_element_attribute_changed(FlyString const&, Optional<String> const&) override;
 
     // ^HTMLElement
     // https://html.spec.whatwg.org/multipage/forms.html#category-label
@@ -188,11 +209,23 @@ private:
     // ^DOM::Element
     virtual i32 default_tab_index_value() const override;
 
+    // https://html.spec.whatwg.org/multipage/input.html#image-button-state-(type=image):dimension-attributes
+    virtual bool supports_dimension_attributes() const override { return type_state() == TypeAttributeState::ImageButton; }
+
+    // ^Layout::ImageProvider
+    virtual bool is_image_available() const override;
+    virtual Optional<CSSPixels> intrinsic_width() const override;
+    virtual Optional<CSSPixels> intrinsic_height() const override;
+    virtual Optional<CSSPixelFraction> intrinsic_aspect_ratio() const override;
+    virtual RefPtr<Gfx::ImmutableBitmap> current_image_bitmap(Gfx::IntSize = {}) const override;
+    virtual void set_visible_in_viewport(bool) override;
+    virtual JS::NonnullGCPtr<DOM::Element const> to_html_element() const override { return *this; }
+
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
     Optional<double> convert_string_to_number(StringView input) const;
-    String covert_number_to_string(double input) const;
+    String convert_number_to_string(double input) const;
 
     WebIDL::ExceptionOr<JS::GCPtr<JS::Date>> convert_string_to_date(StringView input) const;
     String covert_date_to_string(JS::NonnullGCPtr<JS::Date> input) const;
@@ -203,25 +236,38 @@ private:
     double step_scale_factor() const;
     Optional<double> allowed_value_step() const;
     double step_base() const;
-    WebIDL::ExceptionOr<void> step_up_or_down(bool is_down, long n);
+    WebIDL::ExceptionOr<void> step_up_or_down(bool is_down, WebIDL::Long n);
 
     static TypeAttributeState parse_type_attribute(StringView);
     void create_shadow_tree_if_needed();
+    void update_shadow_tree();
     void create_text_input_shadow_tree();
     void create_color_input_shadow_tree();
+    void create_file_input_shadow_tree();
     void create_range_input_shadow_tree();
     WebIDL::ExceptionOr<void> run_input_activation_behavior(DOM::Event const&);
     void set_checked_within_group();
 
+    void handle_maxlength_attribute();
     void handle_readonly_attribute(Optional<String> const& value);
+    WebIDL::ExceptionOr<void> handle_src_attribute(String const& value);
 
     // https://html.spec.whatwg.org/multipage/input.html#value-sanitization-algorithm
     String value_sanitization_algorithm(String const&) const;
+
+    enum class ValueAttributeMode {
+        Value,
+        Default,
+        DefaultOn,
+        Filename,
+    };
+    ValueAttributeMode value_attribute_mode() const;
 
     void update_placeholder_visibility();
     JS::GCPtr<DOM::Element> m_placeholder_element;
     JS::GCPtr<DOM::Text> m_placeholder_text_node;
 
+    void update_text_input_shadow_tree();
     JS::GCPtr<DOM::Element> m_inner_text_element;
     JS::GCPtr<DOM::Text> m_text_node;
     bool m_checked { false };
@@ -229,8 +275,18 @@ private:
     void update_color_well_element();
     JS::GCPtr<DOM::Element> m_color_well_element;
 
+    void update_file_input_shadow_tree();
+    JS::GCPtr<DOM::Element> m_file_button;
+    JS::GCPtr<DOM::Element> m_file_label;
+
     void update_slider_thumb_element();
     JS::GCPtr<DOM::Element> m_slider_thumb;
+
+    JS::GCPtr<DecodedImageData> image_data() const;
+    JS::GCPtr<SharedImageRequest> m_image_request;
+    SelectedCoordinate m_selected_coordinate;
+
+    Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;
 
     // https://html.spec.whatwg.org/multipage/input.html#dom-input-indeterminate
     bool m_indeterminate { false };
@@ -254,6 +310,8 @@ private:
 
     TypeAttributeState m_type { TypeAttributeState::Text };
     String m_value;
+
+    String m_last_src_value;
 
     bool m_has_uncommitted_changes { false };
 };

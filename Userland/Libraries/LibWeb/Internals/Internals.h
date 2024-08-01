@@ -7,6 +7,7 @@
 #pragma once
 
 #include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Internals/InternalAnimationTimeline.h>
 
 namespace Web::Internals {
 
@@ -26,8 +27,12 @@ public:
     void commit_text();
 
     void click(double x, double y);
+    void move_pointer_to(double x, double y);
+    void wheel(double x, double y, double delta_x, double delta_y);
 
     WebIDL::ExceptionOr<bool> dispatch_user_activated_event(DOM::EventTarget&, DOM::Event& event);
+
+    JS::NonnullGCPtr<InternalAnimationTimeline> create_internal_animation_timeline();
 
 private:
     explicit Internals(JS::Realm&);

@@ -8,15 +8,17 @@
 #pragma once
 
 #include <AK/ByteString.h>
-#include <AK/URL.h>
-#include <AK/URLParser.h>
+#include <LibIPC/Decoder.h>
+#include <LibIPC/Encoder.h>
+#include <LibURL/Parser.h>
+#include <LibURL/URL.h>
 
 namespace Web::HTML {
 
 class Origin {
 public:
     Origin() = default;
-    Origin(Optional<ByteString> const& scheme, AK::URL::Host const& host, u16 port)
+    Origin(Optional<ByteString> const& scheme, URL::Host const& host, u16 port)
         : m_scheme(scheme)
         , m_host(host)
         , m_port(port)
@@ -30,7 +32,7 @@ public:
     {
         return m_scheme.map([](auto& str) { return str.view(); }).value_or(StringView {});
     }
-    AK::URL::Host const& host() const { return m_host; }
+    URL::Host const& host() const { return m_host; }
     u16 port() const { return m_port; }
 
     // https://html.spec.whatwg.org/multipage/origin.html#same-origin
@@ -86,7 +88,7 @@ public:
         result.append("://"sv);
 
         // 4. Append origin's host, serialized, to result.
-        result.append(URLParser::serialize_host(host()).release_value_but_fixme_should_propagate_errors().to_byte_string());
+        result.append(URL::Parser::serialize_host(host()).release_value_but_fixme_should_propagate_errors().to_byte_string());
 
         // 5. If origin's port is non-null, append a U+003A COLON character (:), and origin's port, serialized, to result.
         if (port() != 0) {
@@ -98,7 +100,7 @@ public:
     }
 
     // https://html.spec.whatwg.org/multipage/origin.html#concept-origin-effective-domain
-    Optional<AK::URL::Host> effective_domain() const
+    Optional<URL::Host> effective_domain() const
     {
         // 1. If origin is an opaque origin, then return null.
         if (is_opaque())
@@ -114,7 +116,7 @@ public:
 
 private:
     Optional<ByteString> m_scheme;
-    AK::URL::Host m_host;
+    URL::Host m_host;
     u16 m_port { 0 };
 };
 
@@ -128,7 +130,15 @@ struct Traits<Web::HTML::Origin> : public DefaultTraits<Web::HTML::Origin> {
         auto hash_without_host = pair_int_hash(origin.scheme().hash(), origin.port());
         if (origin.host().has<Empty>())
             return hash_without_host;
-        return pair_int_hash(hash_without_host, URLParser::serialize_host(origin.host()).release_value_but_fixme_should_propagate_errors().hash());
+        return pair_int_hash(hash_without_host, URL::Parser::serialize_host(origin.host()).release_value_but_fixme_should_propagate_errors().hash());
     }
 };
 } // namespace AK
+
+namespace IPC {
+template<>
+ErrorOr<void> encode(Encoder&, Web::HTML::Origin const&);
+
+template<>
+ErrorOr<Web::HTML::Origin> decode(Decoder&);
+}

@@ -8,10 +8,12 @@
 #include <AK/QuickSort.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/FunctionObject.h>
+#include <LibWeb/Bindings/WebSocketPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/IDLEventListener.h>
+#include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/HTML/CloseEvent.h>
 #include <LibWeb/HTML/EventHandler.h>
@@ -19,6 +21,7 @@
 #include <LibWeb/HTML/MessageEvent.h>
 #include <LibWeb/HTML/Origin.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/Buffers.h>
 #include <LibWeb/WebIDL/DOMException.h>
@@ -29,27 +32,7 @@ namespace Web::WebSockets {
 
 JS_DEFINE_ALLOCATOR(WebSocket);
 
-static RefPtr<WebSocketClientManager> s_websocket_client_manager;
-
-void WebSocketClientManager::initialize(RefPtr<WebSocketClientManager> websocket_client_manager)
-{
-    s_websocket_client_manager = websocket_client_manager;
-}
-
-WebSocketClientManager& WebSocketClientManager::the()
-{
-    if (!s_websocket_client_manager) [[unlikely]] {
-        dbgln("Web::WebSockets::WebSocketClientManager was not initialized!");
-        VERIFY_NOT_REACHED();
-    }
-    return *s_websocket_client_manager;
-}
-
-WebSocketClientSocket::WebSocketClientSocket() = default;
-
 WebSocketClientSocket::~WebSocketClientSocket() = default;
-
-WebSocketClientManager::WebSocketClientManager() = default;
 
 // https://websockets.spec.whatwg.org/#dom-websocket-websocket
 WebIDL::ExceptionOr<JS::NonnullGCPtr<WebSocket>> WebSocket::construct_impl(JS::Realm& realm, String const& url, Optional<Variant<String, Vector<String>>> const& protocols)
@@ -63,8 +46,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<WebSocket>> WebSocket::construct_impl(JS::R
     auto base_url = relevant_settings_object.api_base_url();
 
     // 2. Let urlRecord be the result of applying the URL parser to url with baseURL.
-    // FIXME: This should call an implementation of https://url.spec.whatwg.org/#concept-url-parser, currently it calls https://url.spec.whatwg.org/#concept-basic-url-parser
-    auto url_record = base_url.complete_url(url);
+    auto url_record = DOMURL::parse(url, base_url);
 
     // 3. If urlRecord is failure, then throw a "SyntaxError" DOMException.
     if (!url_record.is_valid())
@@ -134,10 +116,10 @@ WebSocket::~WebSocket() = default;
 void WebSocket::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::WebSocketPrototype>(realm, "WebSocket"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(WebSocket);
 }
 
-ErrorOr<void> WebSocket::establish_web_socket_connection(AK::URL& url_record, Vector<String>& protocols, HTML::EnvironmentSettingsObject& client)
+ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL& url_record, Vector<String>& protocols, HTML::EnvironmentSettingsObject& client)
 {
     // FIXME: Integrate properly with FETCH as per https://fetch.spec.whatwg.org/#websocket-opening-handshake
 
@@ -148,7 +130,7 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(AK::URL& url_record, Ve
     for (auto const& protocol : protocols)
         TRY(protcol_byte_strings.try_append(protocol.to_byte_string()));
 
-    m_websocket = WebSocketClientManager::the().connect(url_record, origin_string, protcol_byte_strings);
+    m_websocket = ResourceLoader::the().connector().websocket_connect(url_record, origin_string, protcol_byte_strings);
     m_websocket->on_open = [weak_this = make_weak_ptr<WebSocket>()] {
         if (!weak_this)
             return;

@@ -13,12 +13,6 @@
 
 namespace Web::Painting {
 
-enum class TraversalDecision {
-    Continue,
-    SkipChildrenAndContinue,
-    Break,
-};
-
 enum class PaintPhase {
     Background,
     Border,
@@ -51,17 +45,17 @@ enum class HitTestType {
 class Paintable
     : public JS::Cell
     , public TreeNode<Paintable> {
-    JS_CELL(Paintable, Cell);
+    JS_CELL(Paintable, JS::Cell);
 
 public:
     virtual ~Paintable();
 
     [[nodiscard]] bool is_visible() const;
-    [[nodiscard]] bool is_positioned() const;
-    [[nodiscard]] bool is_fixed_position() const { return layout_node().is_fixed_position(); }
-    [[nodiscard]] bool is_absolutely_positioned() const { return layout_node().is_absolutely_positioned(); }
-    [[nodiscard]] bool is_floating() const { return layout_node().is_floating(); }
-    [[nodiscard]] bool is_inline() const { return layout_node().is_inline(); }
+    [[nodiscard]] bool is_positioned() const { return m_positioned; }
+    [[nodiscard]] bool is_fixed_position() const { return m_fixed_position; }
+    [[nodiscard]] bool is_absolutely_positioned() const { return m_absolutely_positioned; }
+    [[nodiscard]] bool is_floating() const { return m_floating; }
+    [[nodiscard]] bool is_inline() const { return m_inline; }
     [[nodiscard]] CSS::Display display() const { return layout_node().display(); }
 
     template<typename U, typename Callback>
@@ -83,6 +77,18 @@ public:
     {
         for (auto* child = first_child(); child; child = child->next_sibling()) {
             if (child->template for_each_in_inclusive_subtree_of_type<U>(callback) == TraversalDecision::Break)
+                return TraversalDecision::Break;
+        }
+        return TraversalDecision::Continue;
+    }
+
+    template<typename Callback>
+    TraversalDecision for_each_in_inclusive_subtree(Callback callback)
+    {
+        if (auto decision = callback(*this); decision != TraversalDecision::Continue)
+            return decision;
+        for (auto* child = first_child(); child; child = child->next_sibling()) {
+            if (child->for_each_in_inclusive_subtree(callback) == TraversalDecision::Break)
                 return TraversalDecision::Break;
         }
         return TraversalDecision::Continue;
@@ -131,7 +137,7 @@ public:
     virtual void apply_clip_overflow_rect(PaintContext&, PaintPhase) const { }
     virtual void clear_clip_overflow_rect(PaintContext&, PaintPhase) const { }
 
-    virtual Optional<HitTestResult> hit_test(CSSPixelPoint, HitTestType) const;
+    [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const& callback) const;
 
     virtual bool wants_mouse_events() const { return false; }
 
@@ -169,10 +175,15 @@ public:
 
     virtual void set_needs_display() const;
 
-    Layout::Box const* containing_block() const
+    PaintableBox* containing_block() const
     {
-        if (!m_containing_block.has_value())
-            m_containing_block = m_layout_node->containing_block();
+        if (!m_containing_block.has_value()) {
+            auto containing_layout_box = m_layout_node->containing_block();
+            if (containing_layout_box)
+                m_containing_block = const_cast<PaintableBox*>(containing_layout_box->paintable_box());
+            else
+                m_containing_block = nullptr;
+        }
         return *m_containing_block;
     }
 
@@ -182,13 +193,26 @@ public:
     [[nodiscard]] virtual bool is_paintable_box() const { return false; }
     [[nodiscard]] virtual bool is_paintable_with_lines() const { return false; }
     [[nodiscard]] virtual bool is_inline_paintable() const { return false; }
+    [[nodiscard]] virtual bool is_svg_paintable() const { return false; }
+    [[nodiscard]] virtual bool is_text_paintable() const { return false; }
 
     DOM::Document const& document() const { return layout_node().document(); }
     DOM::Document& document() { return layout_node().document(); }
 
-    PaintableBox const* nearest_scrollable_ancestor_within_stacking_context() const;
-
     CSSPixelPoint box_type_agnostic_position() const;
+
+    enum class SelectionState : u8 {
+        None,        // No selection
+        Start,       // Selection starts in this Node
+        End,         // Selection ends in this Node
+        StartAndEnd, // Selection starts and ends in this Node
+        Full,        // Selection starts before and ends after this Node
+    };
+
+    SelectionState selection_state() const { return m_selection_state; }
+    void set_selection_state(SelectionState state) { m_selection_state = state; }
+
+    Gfx::AffineTransform compute_combined_css_transform() const;
 
 protected:
     explicit Paintable(Layout::Node const&);
@@ -199,9 +223,17 @@ private:
     JS::GCPtr<DOM::Node> m_dom_node;
     JS::NonnullGCPtr<Layout::Node const> m_layout_node;
     JS::NonnullGCPtr<HTML::BrowsingContext> m_browsing_context;
-    Optional<JS::GCPtr<Layout::Box const>> mutable m_containing_block;
+    Optional<JS::GCPtr<PaintableBox>> mutable m_containing_block;
 
     OwnPtr<StackingContext> m_stacking_context;
+
+    SelectionState m_selection_state { SelectionState::None };
+
+    bool m_positioned : 1 { false };
+    bool m_fixed_position : 1 { false };
+    bool m_absolutely_positioned : 1 { false };
+    bool m_floating : 1 { false };
+    bool m_inline : 1 { false };
 };
 
 inline DOM::Node* HitTestResult::dom_node()
@@ -219,5 +251,8 @@ inline bool Paintable::fast_is<PaintableBox>() const { return is_paintable_box()
 
 template<>
 inline bool Paintable::fast_is<PaintableWithLines>() const { return is_paintable_with_lines(); }
+
+template<>
+inline bool Paintable::fast_is<TextPaintable>() const { return is_text_paintable(); }
 
 }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/URLParser.h>
+#include <LibURL/Parser.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/HTMLHyperlinkElementUtils.h>
 #include <LibWeb/HTML/Navigable.h>
@@ -78,7 +78,7 @@ void HTMLHyperlinkElementUtils::set_protocol(StringView protocol)
         return;
 
     // 3. Basic URL parse the given value, followed by ":", with this element's url as url and scheme start state as state override.
-    auto result_url = URLParser::basic_parse(MUST(String::formatted("{}:", protocol)), {}, m_url, URLParser::State::SchemeStart);
+    auto result_url = URL::Parser::basic_parse(MUST(String::formatted("{}:", protocol)), {}, m_url, URL::Parser::State::SchemeStart);
     if (result_url.is_valid())
         m_url = move(result_url);
 
@@ -192,7 +192,7 @@ void HTMLHyperlinkElementUtils::set_host(StringView host)
         return;
 
     // 4. Basic URL parse the given value, with url as url and host state as state override.
-    auto result_url = URLParser::basic_parse(host, {}, url, URLParser::State::Host);
+    auto result_url = URL::Parser::basic_parse(host, {}, url, URL::Parser::State::Host);
     if (result_url.is_valid())
         m_url = move(result_url);
 
@@ -205,7 +205,7 @@ String HTMLHyperlinkElementUtils::hostname() const
     // 1. Reinitialize url.
     //
     // 2. Let url be this element's url.
-    AK::URL url(href());
+    URL::URL url(href());
 
     // 3. If url or url's host is null, return the empty string.
     if (url.host().has<Empty>())
@@ -228,7 +228,7 @@ void HTMLHyperlinkElementUtils::set_hostname(StringView hostname)
         return;
 
     // 4. Basic URL parse the given value, with url as url and hostname state as state override.
-    auto result_url = URLParser::basic_parse(hostname, {}, m_url, URLParser::State::Hostname);
+    auto result_url = URL::Parser::basic_parse(hostname, {}, m_url, URL::Parser::State::Hostname);
     if (result_url.is_valid())
         m_url = move(result_url);
 
@@ -270,7 +270,7 @@ void HTMLHyperlinkElementUtils::set_port(StringView port)
         m_url->set_port({});
     } else {
         // 5. Otherwise, basic URL parse the given value, with url as url and port state as state override.
-        auto result_url = URLParser::basic_parse(port, {}, m_url, URLParser::State::Port);
+        auto result_url = URL::Parser::basic_parse(port, {}, m_url, URL::Parser::State::Port);
         if (result_url.is_valid())
             m_url = move(result_url);
     }
@@ -314,7 +314,7 @@ void HTMLHyperlinkElementUtils::set_pathname(StringView pathname)
     url->set_paths({});
 
     // 5. Basic URL parse the given value, with url as url and path start state as state override.
-    auto result_url = URLParser::basic_parse(pathname, {}, move(url), URLParser::State::PathStart);
+    auto result_url = URL::Parser::basic_parse(pathname, {}, move(url), URL::Parser::State::PathStart);
     if (result_url.is_valid())
         m_url = move(result_url);
 
@@ -361,7 +361,7 @@ void HTMLHyperlinkElementUtils::set_search(StringView search)
         url_copy->set_query(String {});
 
         //    3. Basic URL parse input, with null, this element's node document's document's character encoding, url as url, and query state as state override.
-        auto result_url = URLParser::basic_parse(input, {}, move(url_copy), URLParser::State::Query);
+        auto result_url = URL::Parser::basic_parse(input, {}, move(url_copy), URL::Parser::State::Query);
         if (result_url.is_valid())
             m_url = move(result_url);
     }
@@ -409,7 +409,7 @@ void HTMLHyperlinkElementUtils::set_hash(StringView hash)
         url_copy->set_fragment(String {});
 
         //    3. Basic URL parse input, with url as url and fragment state as state override.
-        auto result_url = URLParser::basic_parse(input, {}, move(url_copy), URLParser::State::Fragment);
+        auto result_url = URL::Parser::basic_parse(input, {}, move(url_copy), URL::Parser::State::Fragment);
         if (result_url.is_valid())
             m_url = move(result_url);
     }
@@ -504,7 +504,7 @@ void HTMLHyperlinkElementUtils::follow_the_hyperlink(Optional<String> hyperlink_
     if (!url.is_valid())
         return;
 
-    auto url_string = url.to_byte_string();
+    auto url_string = MUST(url.to_string());
 
     // 10. If hyperlinkSuffix is non-null, then append it to urlString.
     if (hyperlink_suffix.has_value()) {
@@ -512,15 +512,16 @@ void HTMLHyperlinkElementUtils::follow_the_hyperlink(Optional<String> hyperlink_
         url_builder.append(url_string);
         url_builder.append(*hyperlink_suffix);
 
-        url_string = url_builder.to_byte_string();
+        url_string = MUST(url_builder.to_string());
     }
 
-    // FIXME: 11. Let referrerPolicy be the current state of subject's referrerpolicy content attribute.
+    // 11. Let referrerPolicy be the current state of subject's referrerpolicy content attribute.
+    auto referrer_policy = ReferrerPolicy::from_string(hyperlink_element_utils_referrerpolicy().value_or({})).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString);
+
     // FIXME: 12. If subject's link types includes the noreferrer keyword, then set referrerPolicy to "no-referrer".
-    auto const referrer_policy = ReferrerPolicy::ReferrerPolicy::EmptyString;
 
     // 13. Navigate targetNavigable to urlString using subject's node document, with referrerPolicy set to referrerPolicy and userInvolvement set to userInvolvement.
-    MUST(target_navigable->navigate({ .url = url, .source_document = hyperlink_element_utils_document(), .referrer_policy = referrer_policy, .user_involvement = user_involvement }));
+    MUST(target_navigable->navigate({ .url = url_string, .source_document = hyperlink_element_utils_document(), .referrer_policy = referrer_policy, .user_involvement = user_involvement }));
 }
 
 }

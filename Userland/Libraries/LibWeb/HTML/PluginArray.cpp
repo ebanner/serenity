@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/PluginArrayPrototype.h>
 #include <LibWeb/HTML/PluginArray.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
@@ -29,7 +30,7 @@ PluginArray::~PluginArray() = default;
 void PluginArray::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::PluginArrayPrototype>(realm, "PluginArray"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(PluginArray);
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#dom-pluginarray-refresh

@@ -11,12 +11,20 @@
 #include <LibGfx/Path.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/SVG/AttributeParser.h>
+#include <LibWeb/SVG/SVGAnimatedTransformList.h>
 #include <LibWeb/SVG/SVGElement.h>
 #include <LibWeb/SVG/SVGGradientElement.h>
 #include <LibWeb/SVG/TagNames.h>
 #include <LibWeb/SVG/ViewBox.h>
 
 namespace Web::SVG {
+
+struct SVGBoundingBoxOptions {
+    bool fill { true };
+    bool stroke { false };
+    bool markers { false };
+    bool clipped { false };
+};
 
 class SVGGraphicsElement : public SVGElement {
     WEB_PLATFORM_OBJECT(SVGGraphicsElement, SVGElement);
@@ -27,11 +35,12 @@ public:
     virtual void attribute_changed(FlyString const& name, Optional<String> const& value) override;
 
     Optional<Gfx::Color> fill_color() const;
-    Optional<FillRule> fill_rule() const;
     Optional<Gfx::Color> stroke_color() const;
     Optional<float> stroke_width() const;
     Optional<float> fill_opacity() const;
     Optional<float> stroke_opacity() const;
+    Optional<FillRule> fill_rule() const;
+    Optional<ClipRule> clip_rule() const;
 
     float visible_stroke_width() const
     {
@@ -46,8 +55,10 @@ public:
     Optional<Gfx::PaintStyle const&> stroke_paint_style(SVGPaintContext const&) const;
 
     JS::GCPtr<SVG::SVGMaskElement const> mask() const;
+    JS::GCPtr<SVG::SVGClipPathElement const> clip_path() const;
 
-    Optional<ViewBox> view_box() const;
+    JS::NonnullGCPtr<Geometry::DOMRect> get_b_box(Optional<SVGBoundingBoxOptions>);
+    JS::NonnullGCPtr<SVGAnimatedTransformList> transform() const;
 
 protected:
     SVGGraphicsElement(DOM::Document&, DOM::QualifiedName);
@@ -64,7 +75,7 @@ protected:
     Gfx::AffineTransform m_transform = {};
 
     template<typename T>
-    JS::GCPtr<T> try_resolve_url_to(AK::URL const& url) const
+    JS::GCPtr<T> try_resolve_url_to(URL::URL const& url) const
     {
         if (!url.fragment().has_value())
             return {};

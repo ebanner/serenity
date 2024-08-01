@@ -122,6 +122,10 @@ ThrowCompletionOr<Value> Reference::get_value(VM& vm) const
             base_obj = realm.intrinsics().number_prototype();
         else if (m_base_value.is_boolean())
             base_obj = realm.intrinsics().boolean_prototype();
+        else if (m_base_value.is_bigint())
+            base_obj = realm.intrinsics().bigint_prototype();
+        else if (m_base_value.is_symbol())
+            base_obj = realm.intrinsics().symbol_prototype();
         else
             base_obj = TRY(m_base_value.to_object(vm));
 
@@ -138,7 +142,7 @@ ThrowCompletionOr<Value> Reference::get_value(VM& vm) const
 
     // c. Return ? base.GetBindingValue(V.[[ReferencedName]], V.[[Strict]]) (see 9.1).
     if (m_environment_coordinate.has_value())
-        return static_cast<DeclarativeEnvironment*>(m_base_environment)->get_binding_value_direct(vm, m_environment_coordinate->index, m_strict);
+        return static_cast<DeclarativeEnvironment*>(m_base_environment)->get_binding_value_direct(vm, m_environment_coordinate->index);
     return m_base_environment->get_binding_value(vm, m_name.as_string(), m_strict);
 }
 

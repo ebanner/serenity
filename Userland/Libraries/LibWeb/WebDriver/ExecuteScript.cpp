@@ -27,6 +27,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/WebDriver/Contexts.h>
 #include <LibWeb/WebDriver/ExecuteScript.h>
@@ -114,9 +115,9 @@ static ErrorOr<JsonValue, ExecuteScriptResultType> internal_json_clone_algorithm
     if (is<HTML::WindowProxy>(value.as_object())) {
         auto const& window_proxy = static_cast<HTML::WindowProxy&>(value.as_object());
 
-        // If the associated browsing context of the WindowProxy object in value has been discarded, return error with
+        // If the associated browsing context of the WindowProxy object in value has been destroyed, return error with
         // error code stale element reference.
-        if (window_proxy.associated_browsing_context()->has_been_discarded())
+        if (window_proxy.associated_browsing_context()->has_navigable_been_destroyed())
             return ExecuteScriptResultType::BrowsingContextDiscarded;
 
         // Otherwise return success with data set to WindowProxy reference object for value.
@@ -226,17 +227,16 @@ static JS::ThrowCompletionOr<JS::Value> execute_a_function_body(Web::Page& page,
 
     // 1. Let window be the associated window of the current browsing context’s active document.
     // FIXME: This will need adjusting when WebDriver supports frames.
-    auto& window = page.top_level_browsing_context().active_document()->window();
+    auto window = page.top_level_browsing_context().active_document()->window();
 
     // 2. Let environment settings be the environment settings object for window.
-    auto& environment_settings = Web::HTML::relevant_settings_object(window);
+    auto& environment_settings = Web::HTML::relevant_settings_object(*window);
 
     // 3. Let global scope be environment settings realm’s global environment.
     auto& global_scope = environment_settings.realm().global_environment();
 
-    auto& realm = window.realm();
+    auto& realm = window->realm();
 
-    bool contains_direct_call_to_eval = false;
     auto source_text = ByteString::formatted("function() {{ {} }}", body);
     auto parser = JS::Parser { JS::Lexer { source_text } };
     auto function_expression = parser.parse_function_node<JS::FunctionExpression>();
@@ -265,12 +265,12 @@ static JS::ThrowCompletionOr<JS::Value> execute_a_function_body(Web::Page& page,
     //    The result of parsing global scope above.
     // strict
     //    The result of parsing strict above.
-    auto function = JS::ECMAScriptFunctionObject::create(realm, "", move(source_text), function_expression->body(), function_expression->parameters(), function_expression->function_length(), function_expression->local_variables_names(), &global_scope, nullptr, function_expression->kind(), function_expression->is_strict_mode(), function_expression->might_need_arguments_object(), contains_direct_call_to_eval);
+    auto function = JS::ECMAScriptFunctionObject::create(realm, "", move(source_text), function_expression->body(), function_expression->parameters(), function_expression->function_length(), function_expression->local_variables_names(), &global_scope, nullptr, function_expression->kind(), function_expression->is_strict_mode(), function_expression->parsing_insights());
 
     // 9. Let completion be Function.[[Call]](window, parameters) with function as the this value.
     // NOTE: This is not entirely clear, but I don't think they mean actually passing `function` as
     // the this value argument, but using it as the object [[Call]] is executed on.
-    auto completion = function->internal_call(&window, move(parameters));
+    auto completion = function->internal_call(window, move(parameters));
 
     // 10. Clean up after running a callback with environment settings.
     environment_settings.clean_up_after_running_callback();

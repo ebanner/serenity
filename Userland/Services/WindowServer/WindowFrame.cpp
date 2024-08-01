@@ -946,7 +946,7 @@ void WindowFrame::start_flash_animation()
             invalidate_titlebar();
             if (!--m_flash_counter)
                 m_flash_timer->stop();
-        }).release_value_but_fixme_should_propagate_errors();
+        });
     }
     m_flash_counter = 8;
     m_flash_timer->start();
@@ -985,6 +985,26 @@ void WindowFrame::latch_window_to_screen_edge(ResizeDirection resize_direction)
         || resize_direction == ResizeDirection::Left
         || resize_direction == ResizeDirection::DownLeft)
         window_rect.inflate(0, 0, 0, frame_rect.left() - screen_rect.left());
+
+    // If required, maintain fixed aspect ratio by scaling the other dimension appropriately
+    if (m_window.resize_aspect_ratio().has_value()) {
+        auto& ratio = m_window.resize_aspect_ratio().value();
+
+        if (window_rect.width() == m_window.rect().width()) {
+            // Up or Down
+            window_rect.set_width(window_rect.height() * ratio.width() / ratio.height());
+        } else {
+            // Left, Right, UpLeft, UpRight, DownLeft or DownRight
+            window_rect.set_height(window_rect.width() * ratio.height() / ratio.width());
+
+            // Match bottom corner of the frame and the screen
+            if (resize_direction == ResizeDirection::DownLeft
+                || resize_direction == ResizeDirection::DownRight) {
+                auto new_frame_rect = frame_rect_for_window(m_window, window_rect);
+                window_rect.translate_by(0, screen_rect.bottom() - new_frame_rect.bottom());
+            }
+        }
+    }
 
     m_window.set_rect(window_rect);
 }

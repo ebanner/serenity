@@ -22,6 +22,7 @@ struct MouseEventInit : public EventModifierInit {
     double movement_y = 0;
     i16 button = 0;
     u16 buttons = 0;
+    JS::GCPtr<DOM::EventTarget> related_target = nullptr;
 };
 
 class MouseEvent : public UIEvent {
@@ -61,6 +62,8 @@ public:
     i16 button() const { return m_button; }
     u16 buttons() const { return m_buttons; }
 
+    JS::GCPtr<DOM::EventTarget> related_target() const { return m_related_target; }
+
     bool get_modifier_state(String const& key_arg) const;
 
     virtual u32 which() const override { return m_button + 1; }
@@ -69,8 +72,11 @@ protected:
     MouseEvent(JS::Realm&, FlyString const& event_name, MouseEventInit const& event_init, double page_x, double page_y, double offset_x, double offset_y);
 
     virtual void initialize(JS::Realm&) override;
+    virtual void visit_edges(Cell::Visitor&) override;
 
 private:
+    virtual bool is_mouse_event() const override { return true; }
+
     void set_event_characteristics();
 
     double m_screen_x { 0 };
@@ -99,6 +105,14 @@ private:
     double m_movement_y { 0 };
     i16 m_button { 0 };
     u16 m_buttons { 0 };
+    JS::GCPtr<DOM::EventTarget> m_related_target { nullptr };
 };
+
+}
+
+namespace Web::DOM {
+
+template<>
+inline bool Event::fast_is<UIEvents::MouseEvent>() const { return is_mouse_event(); }
 
 }

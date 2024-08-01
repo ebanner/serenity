@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLLIElementPrototype.h>
 #include <LibWeb/HTML/HTMLLIElement.h>
 #include <LibWeb/HTML/Window.h>
 
@@ -21,7 +22,7 @@ HTMLLIElement::~HTMLLIElement() = default;
 void HTMLLIElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLLIElementPrototype>(realm, "HTMLLIElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLLIElement);
 }
 
 }

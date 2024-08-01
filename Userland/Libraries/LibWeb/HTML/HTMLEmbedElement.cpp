@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLEmbedElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/HTMLEmbedElement.h>
 
@@ -21,7 +22,7 @@ HTMLEmbedElement::~HTMLEmbedElement() = default;
 void HTMLEmbedElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLEmbedElementPrototype>(realm, "HTMLEmbedElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLEmbedElement);
 }
 
 }

@@ -5,9 +5,11 @@
  */
 
 #include <LibGfx/Bitmap.h>
+#include <LibWeb/Bindings/CanvasPatternPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/CanvasPattern.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
+#include <LibWeb/HTML/ImageBitmap.h>
 
 namespace Web::HTML {
 
@@ -138,7 +140,7 @@ WebIDL::ExceptionOr<JS::GCPtr<CanvasPattern>> CanvasPattern::create(JS::Realm& r
 void CanvasPattern::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CanvasPatternPrototype>(realm, "CanvasPattern"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(CanvasPattern);
 }
 
 }

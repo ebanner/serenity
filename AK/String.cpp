@@ -77,7 +77,7 @@ ErrorOr<String> String::repeated(u32 code_point, size_t count)
     return result;
 }
 
-StringView String::bytes_as_string_view() const
+StringView String::bytes_as_string_view() const&
 {
     return StringView(bytes());
 }
@@ -197,7 +197,7 @@ u32 String::ascii_case_insensitive_hash() const
     return case_insensitive_string_hash(reinterpret_cast<char const*>(bytes().data()), bytes().size());
 }
 
-Utf8View String::code_points() const
+Utf8View String::code_points() const&
 {
     return Utf8View(bytes_as_string_view());
 }
@@ -308,13 +308,14 @@ bool String::equals_ignoring_ascii_case(StringView other) const
     return StringUtils::equals_ignoring_ascii_case(bytes_as_string_view(), other);
 }
 
-String String::repeated(String const& input, size_t count)
+ErrorOr<String> String::repeated(String const& input, size_t count)
 {
-    VERIFY(!Checked<size_t>::multiplication_would_overflow(count, input.bytes().size()));
+    if (Checked<u32>::multiplication_would_overflow(count, input.bytes().size()))
+        return Error::from_errno(EOVERFLOW);
 
     String result;
     size_t input_size = input.bytes().size();
-    MUST(result.replace_with_new_string(count * input_size, [&](Bytes buffer) {
+    TRY(result.replace_with_new_string(count * input_size, [&](Bytes buffer) {
         if (input_size == 1) {
             buffer.fill(input.bytes().first());
         } else {
@@ -323,6 +324,7 @@ String String::repeated(String const& input, size_t count)
         }
         return ErrorOr<void> {};
     }));
+
     return result;
 }
 

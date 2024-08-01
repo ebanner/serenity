@@ -7,6 +7,7 @@
 
 #include <AK/String.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/StoragePrototype.h>
 #include <LibWeb/HTML/Storage.h>
 
 namespace Web::HTML {
@@ -36,7 +37,7 @@ Storage::~Storage() = default;
 void Storage::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::StoragePrototype>(realm, "Storage"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Storage);
 }
 
 // https://html.spec.whatwg.org/multipage/webstorage.html#dom-storage-length

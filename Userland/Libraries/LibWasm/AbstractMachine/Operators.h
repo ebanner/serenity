@@ -58,8 +58,8 @@ struct Divide {
             Checked value(lhs);
             value /= rhs;
             if (value.has_overflow())
-                return AK::Result<Lhs, StringView>("Integer division overflow"sv);
-            return AK::Result<Lhs, StringView>(value.value());
+                return AK::ErrorOr<Lhs, StringView>("Integer division overflow"sv);
+            return AK::ErrorOr<Lhs, StringView>(value.value());
         }
     }
 
@@ -71,12 +71,12 @@ struct Modulo {
     auto operator()(Lhs lhs, Rhs rhs) const
     {
         if (rhs == 0)
-            return AK::Result<Lhs, StringView>("Integer division overflow"sv);
+            return AK::ErrorOr<Lhs, StringView>("Integer division overflow"sv);
         if constexpr (IsSigned<Lhs>) {
             if (rhs == -1)
-                return AK::Result<Lhs, StringView>(0); // Spec weirdness right here, signed division overflow is ignored.
+                return AK::ErrorOr<Lhs, StringView>(0); // Spec weirdness right here, signed division overflow is ignored.
         }
-        return AK::Result<Lhs, StringView>(lhs % rhs);
+        return AK::ErrorOr<Lhs, StringView>(lhs % rhs);
     }
 
     static StringView name() { return "%"sv; }
@@ -172,6 +172,158 @@ struct VectorShiftRight {
     }
 };
 
+struct VectorSwizzle {
+    auto operator()(u128 c1, u128 c2) const
+    {
+        // https://webassembly.github.io/spec/core/bikeshed/#-mathsfi8x16hrefsyntax-instr-vecmathsfswizzle%E2%91%A0
+        auto i = bit_cast<Native128ByteVectorOf<i8, MakeSigned>>(c2);
+        auto j = bit_cast<Native128ByteVectorOf<i8, MakeSigned>>(c1);
+        auto result = AK::SIMD::shuffle(i, j);
+        return bit_cast<u128>(result);
+    }
+    static StringView name() { return "vec(8x16).swizzle"sv; }
+};
+
+template<size_t VectorSize, template<typename> typename SetSign>
+struct VectorExtractLane {
+    size_t lane;
+
+    auto operator()(u128 c) const
+    {
+        auto result = bit_cast<Native128ByteVectorOf<NativeIntegralType<128 / VectorSize>, SetSign>>(c);
+        return result[lane];
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 16:
+            return "vec(8x16).extract_lane"sv;
+        case 8:
+            return "vec(16x8).extract_lane"sv;
+        case 4:
+            return "vec(32x4).extract_lane"sv;
+        case 2:
+            return "vec(64x2).extract_lane"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
+template<size_t VectorSize>
+struct VectorExtractLaneFloat {
+    size_t lane;
+
+    auto operator()(u128 c) const
+    {
+        auto result = bit_cast<NativeFloatingVectorType<128 / VectorSize, VectorSize>>(c);
+        return result[lane];
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 16:
+            return "vec(8x16).extract_lane"sv;
+        case 8:
+            return "vec(16x8).extract_lane"sv;
+        case 4:
+            return "vec(32x4).extract_lane"sv;
+        case 2:
+            return "vec(64x2).extract_lane"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
+template<size_t VectorSize, typename TrueValueType = NativeIntegralType<128 / VectorSize>>
+struct VectorReplaceLane {
+    size_t lane;
+    using ValueType = Conditional<IsFloatingPoint<TrueValueType>, NativeFloatingType<128 / VectorSize>, NativeIntegralType<128 / VectorSize>>;
+
+    auto operator()(u128 c, TrueValueType value) const
+    {
+        auto result = bit_cast<Native128ByteVectorOf<ValueType, MakeUnsigned>>(c);
+        result[lane] = static_cast<ValueType>(value);
+        return bit_cast<u128>(result);
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 16:
+            return "vec(8x16).replace_lane"sv;
+        case 8:
+            return "vec(16x8).replace_lane"sv;
+        case 4:
+            return "vec(32x4).replace_lane"sv;
+        case 2:
+            return "vec(64x2).replace_lane"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
+template<size_t VectorSize, typename Op, template<typename> typename SetSign = MakeSigned>
+struct VectorCmpOp {
+    auto operator()(u128 c1, u128 c2) const
+    {
+        using ElementType = NativeIntegralType<128 / VectorSize>;
+        auto result = bit_cast<Native128ByteVectorOf<ElementType, SetSign>>(c1);
+        auto other = bit_cast<Native128ByteVectorOf<ElementType, SetSign>>(c2);
+        Op op;
+        for (size_t i = 0; i < VectorSize; ++i)
+            result[i] = op(result[i], other[i]) ? static_cast<MakeUnsigned<ElementType>>(-1) : 0;
+        return bit_cast<u128>(result);
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 16:
+            return "vec(8x16).cmp"sv;
+        case 8:
+            return "vec(16x8).cmp"sv;
+        case 4:
+            return "vec(32x4).cmp"sv;
+        case 2:
+            return "vec(64x2).cmp"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
+template<size_t VectorSize, typename Op>
+struct VectorFloatCmpOp {
+    auto operator()(u128 c1, u128 c2) const
+    {
+        auto first = bit_cast<NativeFloatingVectorType<128, VectorSize, NativeFloatingType<128 / VectorSize>>>(c1);
+        auto other = bit_cast<NativeFloatingVectorType<128, VectorSize, NativeFloatingType<128 / VectorSize>>>(c2);
+        using ElementType = NativeIntegralType<128 / VectorSize>;
+        Native128ByteVectorOf<ElementType, MakeUnsigned> result;
+        Op op;
+        for (size_t i = 0; i < VectorSize; ++i)
+            result[i] = op(first[i], other[i]) ? static_cast<ElementType>(-1) : 0;
+        return bit_cast<u128>(result);
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 4:
+            return "vecf(32x4).cmp"sv;
+        case 2:
+            return "vecf(64x2).cmp"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
 struct Minimum {
     template<typename Lhs, typename Rhs>
     auto operator()(Lhs lhs, Rhs rhs) const
@@ -210,6 +362,26 @@ struct Maximum {
     }
 
     static StringView name() { return "maximum"sv; }
+};
+
+struct PseudoMinimum {
+    template<typename Lhs, typename Rhs>
+    auto operator()(Lhs lhs, Rhs rhs) const
+    {
+        return rhs < lhs ? rhs : lhs;
+    }
+
+    static StringView name() { return "pseudo_minimum"sv; }
+};
+
+struct PseudoMaximum {
+    template<typename Lhs, typename Rhs>
+    auto operator()(Lhs lhs, Rhs rhs) const
+    {
+        return lhs < rhs ? rhs : lhs;
+    }
+
+    static StringView name() { return "pseudo_maximum"sv; }
 };
 
 struct CopySign {
@@ -310,6 +482,61 @@ struct Ceil {
     static StringView name() { return "ceil"sv; }
 };
 
+template<size_t VectorSize, typename Op>
+struct VectorFloatBinaryOp {
+    auto operator()(u128 lhs, u128 rhs) const
+    {
+        using VectorType = NativeFloatingVectorType<128, VectorSize, NativeFloatingType<128 / VectorSize>>;
+        auto first = bit_cast<VectorType>(lhs);
+        auto second = bit_cast<VectorType>(rhs);
+        VectorType result;
+        Op op;
+        for (size_t i = 0; i < VectorSize; ++i) {
+            result[i] = op(first[i], second[i]);
+        }
+        return bit_cast<u128>(result);
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 4:
+            return "vecf(32x4).binary_op"sv;
+        case 2:
+            return "vecf(64x2).binary_op"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
+template<size_t VectorSize, typename Op>
+struct VectorFloatUnaryOp {
+    auto operator()(u128 lhs) const
+    {
+        using VectorType = NativeFloatingVectorType<128, VectorSize, NativeFloatingType<128 / VectorSize>>;
+        auto first = bit_cast<VectorType>(lhs);
+        VectorType result;
+        Op op;
+        for (size_t i = 0; i < VectorSize; ++i) {
+            result[i] = op(first[i]);
+        }
+        return bit_cast<u128>(result);
+    }
+
+    static StringView name()
+    {
+        switch (VectorSize) {
+        case 4:
+            return "vecf(32x4).unary_op"sv;
+        case 2:
+            return "vecf(64x2).unary_op"sv;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+};
+
 struct Floor {
     template<typename Lhs>
     auto operator()(Lhs lhs) const
@@ -327,7 +554,7 @@ struct Floor {
 
 struct Truncate {
     template<typename Lhs>
-    AK::Result<Lhs, StringView> operator()(Lhs lhs) const
+    auto operator()(Lhs lhs) const
     {
         if constexpr (IsSame<Lhs, float>)
             return truncf(lhs);
@@ -384,7 +611,7 @@ struct Wrap {
 template<typename ResultT>
 struct CheckedTruncate {
     template<typename Lhs>
-    AK::Result<ResultT, StringView> operator()(Lhs lhs) const
+    AK::ErrorOr<ResultT, StringView> operator()(Lhs lhs) const
     {
         if (isnan(lhs) || isinf(lhs)) // "undefined", let's just trap.
             return "Truncation undefined behavior"sv;

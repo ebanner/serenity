@@ -32,9 +32,15 @@ struct YUV {
     float v { 0 };
 };
 
+struct Oklab {
+    float L { 0 };
+    float a { 0 };
+    float b { 0 };
+};
+
 class Color {
 public:
-    enum NamedColor {
+    enum class NamedColor {
         Transparent,
         Black,
         White,
@@ -60,6 +66,8 @@ public:
         LightBlue,
     };
 
+    using enum NamedColor;
+
     constexpr Color() = default;
     constexpr Color(NamedColor);
     constexpr Color(u8 r, u8 g, u8 b)
@@ -73,15 +81,6 @@ public:
 
     static constexpr Color from_rgb(unsigned rgb) { return Color(rgb | 0xff000000); }
     static constexpr Color from_argb(unsigned argb) { return Color(argb); }
-
-    static constexpr Color from_cmyk(float c, float m, float y, float k)
-    {
-        auto r = static_cast<u8>(255.0f * (1.0f - c) * (1.0f - k));
-        auto g = static_cast<u8>(255.0f * (1.0f - m) * (1.0f - k));
-        auto b = static_cast<u8>(255.0f * (1.0f - y) * (1.0f - k));
-
-        return Color(r, g, b);
-    }
 
     static constexpr Color from_yuv(YUV const& yuv) { return from_yuv(yuv.y, yuv.u, yuv.v); }
     static constexpr Color from_yuv(float y, float u, float v)
@@ -166,6 +165,58 @@ public:
         u8 b_u8 = clamp(lroundf(b * 255.0f), 0, 255);
         u8 a_u8 = clamp(lroundf(a * 255.0f), 0, 255);
         return Color(r_u8, g_u8, b_u8, a_u8);
+    }
+
+    // https://bottosson.github.io/posts/oklab/
+    static constexpr Color from_oklab(float L, float a, float b, float alpha = 1.0f)
+    {
+        auto linear_to_srgb = [](float c) {
+            return c >= 0.0031308f ? 1.055f * pow(c, 0.4166666f) - 0.055f : 12.92f * c;
+        };
+
+        float l = L + 0.3963377774f * a + 0.2158037573f * b;
+        float m = L - 0.1055613458f * a - 0.0638541728f * b;
+        float s = L - 0.0894841775f * a - 1.2914855480f * b;
+
+        l = l * l * l;
+        m = m * m * m;
+        s = s * s * s;
+
+        float red = 4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+        float green = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+        float blue = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+
+        red = linear_to_srgb(red) * 255.f;
+        green = linear_to_srgb(green) * 255.f;
+        blue = linear_to_srgb(blue) * 255.f;
+
+        return Color(
+            clamp(lroundf(red), 0, 255),
+            clamp(lroundf(green), 0, 255),
+            clamp(lroundf(blue), 0, 255),
+            clamp(lroundf(alpha * 255.f), 0, 255));
+    }
+
+    // https://bottosson.github.io/posts/oklab/
+    constexpr Oklab to_oklab()
+    {
+        auto srgb_to_linear = [](float c) {
+            return c >= 0.04045f ? pow((c + 0.055f) / 1.055f, 2.4f) : c / 12.92f;
+        };
+
+        float r = srgb_to_linear(red() / 255.f);
+        float g = srgb_to_linear(green() / 255.f);
+        float b = srgb_to_linear(blue() / 255.f);
+
+        float l = cbrtf(0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b);
+        float m = cbrtf(0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b);
+        float s = cbrtf(0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b);
+
+        return {
+            0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s,
+            1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s,
+            0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s,
+        };
     }
 
     constexpr u8 red() const { return (m_value >> 16) & 0xff; }
@@ -267,7 +318,7 @@ public:
 
     constexpr u8 luminosity() const
     {
-        return (red() * 0.2126f + green() * 0.7152f + blue() * 0.0722f);
+        return round_to<u8>(red() * 0.2126f + green() * 0.7152f + blue() * 0.0722f);
     }
 
     constexpr float contrast_ratio(Color other)
@@ -573,8 +624,32 @@ using Gfx::Color;
 namespace AK {
 
 template<>
+class Traits<Color> : public DefaultTraits<Color> {
+public:
+    static unsigned hash(Color const& color)
+    {
+        return int_hash(color.value());
+    }
+};
+
+template<>
 struct Formatter<Gfx::Color> : public Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder&, Gfx::Color);
+};
+
+template<>
+struct Formatter<Gfx::YUV> : public Formatter<FormatString> {
+    ErrorOr<void> format(FormatBuilder&, Gfx::YUV);
+};
+
+template<>
+struct Formatter<Gfx::HSV> : public Formatter<FormatString> {
+    ErrorOr<void> format(FormatBuilder&, Gfx::HSV);
+};
+
+template<>
+struct Formatter<Gfx::Oklab> : public Formatter<FormatString> {
+    ErrorOr<void> format(FormatBuilder&, Gfx::Oklab);
 };
 
 }

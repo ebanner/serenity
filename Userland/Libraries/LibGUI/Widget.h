@@ -71,6 +71,15 @@ enum class AllowCallback {
     Yes
 };
 
+template<typename T>
+ALWAYS_INLINE ErrorOr<void> initialize(T& object)
+{
+    if constexpr (requires { { object.initialize() } -> SameAs<ErrorOr<void>>; })
+        return object.initialize();
+    else
+        return {};
+}
+
 class Widget : public GUI::Object {
     C_OBJECT(Widget)
 public:
@@ -206,7 +215,7 @@ public:
     bool focus_preempted() const { return m_focus_preempted; }
     void set_focus_preempted(bool b) { m_focus_preempted = b; }
 
-    Function<void(bool const, const FocusSource)> on_focus_change;
+    Function<void(bool const, FocusSource const)> on_focus_change;
 
     // Returns true if this widget or one of its descendants is focused.
     bool has_focus_within() const;

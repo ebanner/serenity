@@ -16,6 +16,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(abbr)                       \
     __ENUMERATE_HTML_ATTRIBUTE(accept)                     \
     __ENUMERATE_HTML_ATTRIBUTE(accept_charset)             \
+    __ENUMERATE_HTML_ATTRIBUTE(accesskey)                  \
     __ENUMERATE_HTML_ATTRIBUTE(action)                     \
     __ENUMERATE_HTML_ATTRIBUTE(align)                      \
     __ENUMERATE_HTML_ATTRIBUTE(alink)                      \
@@ -66,6 +67,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(enctype)                    \
     __ENUMERATE_HTML_ATTRIBUTE(event)                      \
     __ENUMERATE_HTML_ATTRIBUTE(face)                       \
+    __ENUMERATE_HTML_ATTRIBUTE(fetchpriority)              \
     __ENUMERATE_HTML_ATTRIBUTE(for_)                       \
     __ENUMERATE_HTML_ATTRIBUTE(form)                       \
     __ENUMERATE_HTML_ATTRIBUTE(formaction)                 \
@@ -103,9 +105,11 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(marginheight)               \
     __ENUMERATE_HTML_ATTRIBUTE(marginwidth)                \
     __ENUMERATE_HTML_ATTRIBUTE(max)                        \
+    __ENUMERATE_HTML_ATTRIBUTE(maxlength)                  \
     __ENUMERATE_HTML_ATTRIBUTE(media)                      \
     __ENUMERATE_HTML_ATTRIBUTE(method)                     \
     __ENUMERATE_HTML_ATTRIBUTE(min)                        \
+    __ENUMERATE_HTML_ATTRIBUTE(minlength)                  \
     __ENUMERATE_HTML_ATTRIBUTE(multiple)                   \
     __ENUMERATE_HTML_ATTRIBUTE(muted)                      \
     __ENUMERATE_HTML_ATTRIBUTE(name)                       \
@@ -141,6 +145,8 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(onended)                    \
     __ENUMERATE_HTML_ATTRIBUTE(onerror)                    \
     __ENUMERATE_HTML_ATTRIBUTE(onfocus)                    \
+    __ENUMERATE_HTML_ATTRIBUTE(onfocusin)                  \
+    __ENUMERATE_HTML_ATTRIBUTE(onfocusout)                 \
     __ENUMERATE_HTML_ATTRIBUTE(onformdata)                 \
     __ENUMERATE_HTML_ATTRIBUTE(onhashchange)               \
     __ENUMERATE_HTML_ATTRIBUTE(oninput)                    \
@@ -180,6 +186,7 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(onseeked)                   \
     __ENUMERATE_HTML_ATTRIBUTE(onseeking)                  \
     __ENUMERATE_HTML_ATTRIBUTE(onselect)                   \
+    __ENUMERATE_HTML_ATTRIBUTE(onselectionchange)          \
     __ENUMERATE_HTML_ATTRIBUTE(onslotchange)               \
     __ENUMERATE_HTML_ATTRIBUTE(onstalled)                  \
     __ENUMERATE_HTML_ATTRIBUTE(onstorage)                  \
@@ -216,6 +223,10 @@ namespace AttributeNames {
     __ENUMERATE_HTML_ATTRIBUTE(scheme)                     \
     __ENUMERATE_HTML_ATTRIBUTE(scrolling)                  \
     __ENUMERATE_HTML_ATTRIBUTE(selected)                   \
+    __ENUMERATE_HTML_ATTRIBUTE(shadowrootclonable)         \
+    __ENUMERATE_HTML_ATTRIBUTE(shadowrootdelegatesfocus)   \
+    __ENUMERATE_HTML_ATTRIBUTE(shadowrootmode)             \
+    __ENUMERATE_HTML_ATTRIBUTE(shadowrootserializable)     \
     __ENUMERATE_HTML_ATTRIBUTE(shape)                      \
     __ENUMERATE_HTML_ATTRIBUTE(size)                       \
     __ENUMERATE_HTML_ATTRIBUTE(sizes)                      \

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLParagraphElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/CSS/StyleValues/IdentifierStyleValue.h>
@@ -23,7 +24,7 @@ HTMLParagraphElement::~HTMLParagraphElement() = default;
 void HTMLParagraphElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLParagraphElementPrototype>(realm, "HTMLParagraphElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLParagraphElement);
 }
 
 // https://html.spec.whatwg.org/multipage/rendering.html#tables-2

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLTrackElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/HTMLTrackElement.h>
 
@@ -21,7 +22,7 @@ HTMLTrackElement::~HTMLTrackElement() = default;
 void HTMLTrackElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLTrackElementPrototype>(realm, "HTMLTrackElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLTrackElement);
 }
 
 }

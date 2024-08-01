@@ -16,11 +16,11 @@
 #include <AK/RefPtr.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
-#include <AK/URL.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <AK/WeakPtr.h>
 #include <LibGfx/Color.h>
+#include <LibURL/URL.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/Length.h>
 #include <LibWeb/CSS/ValueID.h>
@@ -86,6 +86,7 @@ using StyleValueVector = Vector<ValueComparingNonnullRefPtr<StyleValue const>>;
     __ENUMERATE_STYLE_VALUE_TYPE(Angle, angle)                             \
     __ENUMERATE_STYLE_VALUE_TYPE(BackgroundRepeat, background_repeat)      \
     __ENUMERATE_STYLE_VALUE_TYPE(BackgroundSize, background_size)          \
+    __ENUMERATE_STYLE_VALUE_TYPE(BasicShape, basic_shape)                  \
     __ENUMERATE_STYLE_VALUE_TYPE(BorderRadius, border_radius)              \
     __ENUMERATE_STYLE_VALUE_TYPE(Calculated, calculated)                   \
     __ENUMERATE_STYLE_VALUE_TYPE(Color, color)                             \
@@ -123,6 +124,7 @@ using StyleValueVector = Vector<ValueComparingNonnullRefPtr<StyleValue const>>;
     __ENUMERATE_STYLE_VALUE_TYPE(String, string)                           \
     __ENUMERATE_STYLE_VALUE_TYPE(Time, time)                               \
     __ENUMERATE_STYLE_VALUE_TYPE(Transformation, transformation)           \
+    __ENUMERATE_STYLE_VALUE_TYPE(Transition, transition)                   \
     __ENUMERATE_STYLE_VALUE_TYPE(Unresolved, unresolved)                   \
     __ENUMERATE_STYLE_VALUE_TYPE(Unset, unset)                             \
     __ENUMERATE_STYLE_VALUE_TYPE(URL, url)                                 \

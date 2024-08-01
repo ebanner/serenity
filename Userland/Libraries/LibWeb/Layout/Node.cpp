@@ -126,6 +126,11 @@ Box const* Node::containing_block() const
     return nearest_ancestor_capable_of_forming_a_containing_block(*this);
 }
 
+Box const* Node::static_position_containing_block() const
+{
+    return nearest_ancestor_capable_of_forming_a_containing_block(*this);
+}
+
 Box const* Node::non_anonymous_containing_block() const
 {
     auto nearest_ancestor_box = containing_block();
@@ -193,7 +198,7 @@ bool Node::establishes_stacking_context() const
     // - perspective
     // - clip-path
     // - mask / mask-image / mask-border
-    if (computed_values().mask().has_value())
+    if (computed_values().mask().has_value() || computed_values().clip_path().has_value())
         return true;
 
     return computed_values().opacity() < 1.0f;
@@ -259,12 +264,13 @@ bool Node::is_fixed_position() const
 
 NodeWithStyle::NodeWithStyle(DOM::Document& document, DOM::Node* node, NonnullRefPtr<CSS::StyleProperties> computed_style)
     : Node(document, node)
+    , m_computed_values(make<CSS::ComputedValues>())
 {
     m_has_style = true;
     apply_style(*computed_style);
 }
 
-NodeWithStyle::NodeWithStyle(DOM::Document& document, DOM::Node* node, CSS::ComputedValues computed_values)
+NodeWithStyle::NodeWithStyle(DOM::Document& document, DOM::Node* node, NonnullOwnPtr<CSS::ComputedValues> computed_values)
     : Node(document, node)
     , m_computed_values(move(computed_values))
 {
@@ -274,7 +280,7 @@ NodeWithStyle::NodeWithStyle(DOM::Document& document, DOM::Node* node, CSS::Comp
 void NodeWithStyle::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    for (auto& layer : m_computed_values.background_layers()) {
+    for (auto& layer : computed_values().background_layers()) {
         if (layer.background_image && layer.background_image->is_image())
             layer.background_image->as_image().visit_edges(visitor);
     }
@@ -306,7 +312,7 @@ static CSSPixels snap_a_length_as_a_border_width(double device_pixels_per_css_pi
 
 void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
 {
-    auto& computed_values = static_cast<CSS::MutableComputedValues&>(m_computed_values);
+    auto& computed_values = mutable_computed_values();
 
     // NOTE: color must be set first to ensure currentColor can be resolved in other properties (e.g. background-color).
     computed_values.set_color(computed_style.color_or_fallback(CSS::PropertyID::Color, *this, CSS::InitialValues::color()));
@@ -391,6 +397,8 @@ void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
                     return CSS::BackgroundBox::ContentBox;
                 case CSS::ValueID::PaddingBox:
                     return CSS::BackgroundBox::PaddingBox;
+                case CSS::ValueID::Text:
+                    return CSS::BackgroundBox::Text;
                 default:
                     VERIFY_NOT_REACHED();
                 }
@@ -669,6 +677,8 @@ void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
     computed_values.set_box_shadow(computed_style.box_shadow(*this));
 
     computed_values.set_transformations(computed_style.transformations());
+    if (auto transform_box = computed_style.transform_box(); transform_box.has_value())
+        computed_values.set_transform_box(transform_box.value());
     computed_values.set_transform_origin(computed_style.transform_origin());
 
     auto transition_delay_property = computed_style.property(CSS::PropertyID::TransitionDelay);
@@ -698,7 +708,7 @@ void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
             auto resolve_border_width = [&]() -> CSSPixels {
                 auto value = computed_style.property(width_property);
                 if (value->is_calculated())
-                    return value->as_calculated().resolve_length(*this)->to_px(*this);
+                    return max(CSSPixels { 0 }, value->as_calculated().resolve_length(*this)->to_px(*this));
                 if (value->is_length())
                     return value->as_length().length().to_px(*this);
                 if (value->is_identifier()) {
@@ -748,6 +758,21 @@ void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
     computed_values.set_grid_template_areas(computed_style.grid_template_areas());
     computed_values.set_grid_auto_flow(computed_style.grid_auto_flow());
 
+    if (auto cx_value = computed_style.length_percentage(CSS::PropertyID::Cx); cx_value.has_value())
+        computed_values.set_cx(*cx_value);
+    if (auto cy_value = computed_style.length_percentage(CSS::PropertyID::Cy); cy_value.has_value())
+        computed_values.set_cy(*cy_value);
+    if (auto r_value = computed_style.length_percentage(CSS::PropertyID::R); r_value.has_value())
+        computed_values.set_r(*r_value);
+    if (auto rx_value = computed_style.length_percentage(CSS::PropertyID::Rx); rx_value.has_value())
+        computed_values.set_rx(*rx_value);
+    if (auto ry_value = computed_style.length_percentage(CSS::PropertyID::Ry); ry_value.has_value())
+        computed_values.set_ry(*ry_value);
+    if (auto x_value = computed_style.length_percentage(CSS::PropertyID::X); x_value.has_value())
+        computed_values.set_x(*x_value);
+    if (auto y_value = computed_style.length_percentage(CSS::PropertyID::Y); y_value.has_value())
+        computed_values.set_y(*y_value);
+
     auto fill = computed_style.property(CSS::PropertyID::Fill);
     if (fill->has_color())
         computed_values.set_fill(fill->to_color(*this));
@@ -775,6 +800,15 @@ void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
 
     if (auto mask = computed_style.property(CSS::PropertyID::Mask); mask->is_url())
         computed_values.set_mask(mask->as_url().url());
+
+    auto clip_path = computed_style.property(CSS::PropertyID::ClipPath);
+    if (clip_path->is_url())
+        computed_values.set_clip_path(clip_path->as_url().url());
+    else if (clip_path->is_basic_shape())
+        computed_values.set_clip_path(clip_path->as_basic_shape());
+
+    if (auto clip_rule = computed_style.clip_rule(); clip_rule.has_value())
+        computed_values.set_clip_rule(*clip_rule);
 
     if (auto fill_rule = computed_style.fill_rule(); fill_rule.has_value())
         computed_values.set_fill_rule(*fill_rule);
@@ -823,6 +857,14 @@ void NodeWithStyle::apply_style(const CSS::StyleProperties& computed_style)
     computed_values.set_math_depth(computed_style.math_depth());
     computed_values.set_quotes(computed_style.quotes());
 
+    if (auto object_fit = computed_style.object_fit(); object_fit.has_value())
+        computed_values.set_object_fit(object_fit.value());
+
+    computed_values.set_object_position(computed_style.object_position());
+
+    if (auto scrollbar_width = computed_style.scrollbar_width(); scrollbar_width.has_value())
+        computed_values.set_scrollbar_width(scrollbar_width.value());
+
     propagate_style_to_anonymous_wrappers();
 }
 
@@ -836,16 +878,17 @@ void NodeWithStyle::propagate_style_to_anonymous_wrappers()
     // the parent inherits style from *this* node, not the other way around.
     if (display().is_table_inside() && is<TableWrapper>(parent())) {
         auto& table_wrapper = *static_cast<TableWrapper*>(parent());
-        static_cast<CSS::MutableComputedValues&>(static_cast<CSS::ComputedValues&>(const_cast<CSS::ImmutableComputedValues&>(table_wrapper.computed_values()))).inherit_from(m_computed_values);
-        transfer_table_box_computed_values_to_wrapper_computed_values(table_wrapper.m_computed_values);
+        static_cast<CSS::MutableComputedValues&>(static_cast<CSS::ComputedValues&>(const_cast<CSS::ImmutableComputedValues&>(table_wrapper.computed_values()))).inherit_from(computed_values());
+        transfer_table_box_computed_values_to_wrapper_computed_values(table_wrapper.mutable_computed_values());
     }
 
     // Propagate style to all anonymous children (except table wrappers!)
     for_each_child_of_type<NodeWithStyle>([&](NodeWithStyle& child) {
         if (child.is_anonymous() && !is<TableWrapper>(child)) {
             auto& child_computed_values = static_cast<CSS::MutableComputedValues&>(static_cast<CSS::ComputedValues&>(const_cast<CSS::ImmutableComputedValues&>(child.computed_values())));
-            child_computed_values.inherit_from(m_computed_values);
+            child_computed_values.inherit_from(computed_values());
         }
+        return IterationDecision::Continue;
     });
 }
 
@@ -856,7 +899,7 @@ bool Node::is_root_element() const
     return is<HTML::HTMLHtmlElement>(*dom_node());
 }
 
-ByteString Node::debug_description() const
+String Node::debug_description() const
 {
     StringBuilder builder;
     builder.append(class_name());
@@ -872,7 +915,7 @@ ByteString Node::debug_description() const
     } else {
         builder.append("(anonymous)"sv);
     }
-    return builder.to_byte_string();
+    return MUST(builder.to_string());
 }
 
 CSS::Display Node::display() const
@@ -904,8 +947,8 @@ bool Node::is_inline_table() const
 
 JS::NonnullGCPtr<NodeWithStyle> NodeWithStyle::create_anonymous_wrapper() const
 {
-    auto wrapper = heap().allocate_without_realm<BlockContainer>(const_cast<DOM::Document&>(document()), nullptr, m_computed_values.clone_inherited_values());
-    static_cast<CSS::MutableComputedValues&>(wrapper->m_computed_values).set_display(CSS::Display(CSS::DisplayOutside::Block, CSS::DisplayInside::Flow));
+    auto wrapper = heap().allocate_without_realm<BlockContainer>(const_cast<DOM::Document&>(document()), nullptr, computed_values().clone_inherited_values());
+    wrapper->mutable_computed_values().set_display(CSS::Display(CSS::DisplayOutside::Block, CSS::DisplayInside::Flow));
     return *wrapper;
 }
 
@@ -913,7 +956,7 @@ void NodeWithStyle::reset_table_box_computed_values_used_by_wrapper_to_init_valu
 {
     VERIFY(this->display().is_table_inside());
 
-    CSS::MutableComputedValues& mutable_computed_values = static_cast<CSS::MutableComputedValues&>(m_computed_values);
+    auto& mutable_computed_values = this->mutable_computed_values();
     mutable_computed_values.set_position(CSS::InitialValues::position());
     mutable_computed_values.set_float(CSS::InitialValues::float_());
     mutable_computed_values.set_clear(CSS::InitialValues::clear());

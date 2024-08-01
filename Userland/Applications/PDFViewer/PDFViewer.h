@@ -62,10 +62,14 @@ public:
 
     PageViewMode page_view_mode() const { return m_page_view_mode; }
     void set_page_view_mode(PageViewMode);
+    bool show_rendering_diagnostics() const { return m_rendering_preferences.show_diagnostics; }
+    void set_show_rendering_diagnostics(bool);
     bool show_clipping_paths() const { return m_rendering_preferences.show_clipping_paths; }
     void set_show_clipping_paths(bool);
     bool show_images() const { return m_rendering_preferences.show_images; }
     void set_show_images(bool);
+    bool show_hidden_text() const { return m_rendering_preferences.show_hidden_text; }
+    void set_show_hidden_text(bool);
     bool clip_images() const { return m_rendering_preferences.clip_images; }
     void set_clip_images(bool);
     bool clip_paths() const { return m_rendering_preferences.clip_paths; }

@@ -1,10 +1,12 @@
 /*
- * Copyright (c) 2022-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022-2024, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2024, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/Debug.h>
+#include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Layout/AvailableSpace.h>
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/InlineNode.h>
@@ -12,6 +14,8 @@
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/InlinePaintable.h>
 #include <LibWeb/Painting/SVGPathPaintable.h>
+#include <LibWeb/Painting/SVGSVGPaintable.h>
+#include <LibWeb/Painting/TextPaintable.h>
 
 namespace Web::Layout {
 
@@ -27,14 +31,14 @@ LayoutState::~LayoutState()
 
 LayoutState::UsedValues& LayoutState::get_mutable(NodeWithStyle const& node)
 {
-    if (auto* used_values = used_values_per_layout_node.get(&node).value_or(nullptr))
+    if (auto* used_values = used_values_per_layout_node.get(node).value_or(nullptr))
         return *used_values;
 
     for (auto const* ancestor = m_parent; ancestor; ancestor = ancestor->m_parent) {
-        if (auto* ancestor_used_values = ancestor->used_values_per_layout_node.get(&node).value_or(nullptr)) {
+        if (auto* ancestor_used_values = ancestor->used_values_per_layout_node.get(node).value_or(nullptr)) {
             auto cow_used_values = adopt_own(*new UsedValues(*ancestor_used_values));
             auto* cow_used_values_ptr = cow_used_values.ptr();
-            used_values_per_layout_node.set(&node, move(cow_used_values));
+            used_values_per_layout_node.set(node, move(cow_used_values));
             return *cow_used_values_ptr;
         }
     }
@@ -44,17 +48,17 @@ LayoutState::UsedValues& LayoutState::get_mutable(NodeWithStyle const& node)
     auto new_used_values = adopt_own(*new UsedValues);
     auto* new_used_values_ptr = new_used_values.ptr();
     new_used_values->set_node(const_cast<NodeWithStyle&>(node), containing_block_used_values);
-    used_values_per_layout_node.set(&node, move(new_used_values));
+    used_values_per_layout_node.set(node, move(new_used_values));
     return *new_used_values_ptr;
 }
 
 LayoutState::UsedValues const& LayoutState::get(NodeWithStyle const& node) const
 {
-    if (auto const* used_values = used_values_per_layout_node.get(&node).value_or(nullptr))
+    if (auto const* used_values = used_values_per_layout_node.get(node).value_or(nullptr))
         return *used_values;
 
     for (auto const* ancestor = m_parent; ancestor; ancestor = ancestor->m_parent) {
-        if (auto const* ancestor_used_values = ancestor->used_values_per_layout_node.get(&node).value_or(nullptr))
+        if (auto const* ancestor_used_values = ancestor->used_values_per_layout_node.get(node).value_or(nullptr))
             return *ancestor_used_values;
     }
 
@@ -63,7 +67,7 @@ LayoutState::UsedValues const& LayoutState::get(NodeWithStyle const& node) const
     auto new_used_values = adopt_own(*new UsedValues);
     auto* new_used_values_ptr = new_used_values.ptr();
     new_used_values->set_node(const_cast<NodeWithStyle&>(node), containing_block_used_values);
-    const_cast<LayoutState*>(this)->used_values_per_layout_node.set(&node, move(new_used_values));
+    const_cast<LayoutState*>(this)->used_values_per_layout_node.set(node, move(new_used_values));
     return *new_used_values_ptr;
 }
 
@@ -123,6 +127,8 @@ static CSSPixelRect measure_scrollable_overflow(Box const& box)
                 for (auto const& fragment : static_cast<Painting::InlinePaintable const&>(*child.paintable()).fragments())
                     scrollable_overflow_rect = scrollable_overflow_rect.united(fragment.absolute_rect());
             }
+
+            return IterationDecision::Continue;
         });
     }
 
@@ -194,190 +200,6 @@ static void build_paint_tree(Node& node, Painting::Paintable* parent_paintable =
     }
 }
 
-static Painting::BorderRadiiData normalized_border_radii_data(Layout::Node const& node, CSSPixelRect const& rect, CSS::BorderRadiusData top_left_radius, CSS::BorderRadiusData top_right_radius, CSS::BorderRadiusData bottom_right_radius, CSS::BorderRadiusData bottom_left_radius)
-{
-    Painting::BorderRadiusData bottom_left_radius_px {};
-    Painting::BorderRadiusData bottom_right_radius_px {};
-    Painting::BorderRadiusData top_left_radius_px {};
-    Painting::BorderRadiusData top_right_radius_px {};
-
-    bottom_left_radius_px.horizontal_radius = bottom_left_radius.horizontal_radius.to_px(node, rect.width());
-    bottom_right_radius_px.horizontal_radius = bottom_right_radius.horizontal_radius.to_px(node, rect.width());
-    top_left_radius_px.horizontal_radius = top_left_radius.horizontal_radius.to_px(node, rect.width());
-    top_right_radius_px.horizontal_radius = top_right_radius.horizontal_radius.to_px(node, rect.width());
-
-    bottom_left_radius_px.vertical_radius = bottom_left_radius.vertical_radius.to_px(node, rect.height());
-    bottom_right_radius_px.vertical_radius = bottom_right_radius.vertical_radius.to_px(node, rect.height());
-    top_left_radius_px.vertical_radius = top_left_radius.vertical_radius.to_px(node, rect.height());
-    top_right_radius_px.vertical_radius = top_right_radius.vertical_radius.to_px(node, rect.height());
-
-    // Scale overlapping curves according to https://www.w3.org/TR/css-backgrounds-3/#corner-overlap
-    // Let f = min(Li/Si), where i ∈ {top, right, bottom, left},
-    // Si is the sum of the two corresponding radii of the corners on side i,
-    // and Ltop = Lbottom = the width of the box, and Lleft = Lright = the height of the box.
-    auto l_top = rect.width();
-    auto l_bottom = l_top;
-    auto l_left = rect.height();
-    auto l_right = l_left;
-    auto s_top = (top_left_radius_px.horizontal_radius + top_right_radius_px.horizontal_radius);
-    auto s_right = (top_right_radius_px.vertical_radius + bottom_right_radius_px.vertical_radius);
-    auto s_bottom = (bottom_left_radius_px.horizontal_radius + bottom_right_radius_px.horizontal_radius);
-    auto s_left = (top_left_radius_px.vertical_radius + bottom_left_radius_px.vertical_radius);
-    CSSPixelFraction f = 1;
-    f = (s_top != 0) ? min(f, l_top / s_top) : f;
-    f = (s_right != 0) ? min(f, l_right / s_right) : f;
-    f = (s_bottom != 0) ? min(f, l_bottom / s_bottom) : f;
-    f = (s_left != 0) ? min(f, l_left / s_left) : f;
-
-    // If f < 1, then all corner radii are reduced by multiplying them by f.
-    if (f < 1) {
-        top_left_radius_px.horizontal_radius *= f;
-        top_left_radius_px.vertical_radius *= f;
-        top_right_radius_px.horizontal_radius *= f;
-        top_right_radius_px.vertical_radius *= f;
-        bottom_right_radius_px.horizontal_radius *= f;
-        bottom_right_radius_px.vertical_radius *= f;
-        bottom_left_radius_px.horizontal_radius *= f;
-        bottom_left_radius_px.vertical_radius *= f;
-    }
-
-    return Painting::BorderRadiiData { top_left_radius_px, top_right_radius_px, bottom_right_radius_px, bottom_left_radius_px };
-}
-
-void LayoutState::resolve_layout_dependent_properties()
-{
-    // Resolves layout-dependent properties not handled during layout and stores them in the paint tree.
-    // Properties resolved include:
-    // - Border radii
-    // - Box shadows
-    // - Text shadows
-    // - Transforms
-    // - Transform origins
-
-    for (auto& it : used_values_per_layout_node) {
-        auto& used_values = *it.value;
-        auto& node = const_cast<NodeWithStyle&>(used_values.node());
-
-        auto* paintable = node.paintable();
-        auto const is_inline_paintable = paintable && paintable->is_inline_paintable();
-        auto const is_paintable_box = paintable && paintable->is_paintable_box();
-        auto const is_paintable_with_lines = paintable && paintable->is_paintable_with_lines();
-
-        // Border radii
-        if (is_inline_paintable) {
-            auto& inline_paintable = static_cast<Painting::InlinePaintable&>(*paintable);
-            auto& fragments = inline_paintable.fragments();
-
-            auto const& top_left_border_radius = inline_paintable.computed_values().border_top_left_radius();
-            auto const& top_right_border_radius = inline_paintable.computed_values().border_top_right_radius();
-            auto const& bottom_right_border_radius = inline_paintable.computed_values().border_bottom_right_radius();
-            auto const& bottom_left_border_radius = inline_paintable.computed_values().border_bottom_left_radius();
-
-            auto containing_block_position_in_absolute_coordinates = inline_paintable.containing_block()->paintable_box()->absolute_position();
-            for (size_t i = 0; i < fragments.size(); ++i) {
-                auto is_first_fragment = i == 0;
-                auto is_last_fragment = i == fragments.size() - 1;
-                auto& fragment = fragments[i];
-                CSSPixelRect absolute_fragment_rect { containing_block_position_in_absolute_coordinates.translated(fragment.offset()), fragment.size() };
-                if (is_first_fragment) {
-                    auto extra_start_width = inline_paintable.box_model().padding.left;
-                    absolute_fragment_rect.translate_by(-extra_start_width, 0);
-                    absolute_fragment_rect.set_width(absolute_fragment_rect.width() + extra_start_width);
-                }
-                if (is_last_fragment) {
-                    auto extra_end_width = inline_paintable.box_model().padding.right;
-                    absolute_fragment_rect.set_width(absolute_fragment_rect.width() + extra_end_width);
-                }
-                auto border_radii_data = normalized_border_radii_data(inline_paintable.layout_node(), absolute_fragment_rect, top_left_border_radius, top_right_border_radius, bottom_right_border_radius, bottom_left_border_radius);
-                fragment.set_border_radii_data(border_radii_data);
-            }
-        }
-
-        // Border radii
-        if (is_paintable_box) {
-            auto& paintable_box = static_cast<Painting::PaintableBox&>(*paintable);
-
-            CSSPixelRect const border_rect { 0, 0, used_values.border_box_width(), used_values.border_box_height() };
-
-            auto const& border_top_left_radius = node.computed_values().border_top_left_radius();
-            auto const& border_top_right_radius = node.computed_values().border_top_right_radius();
-            auto const& border_bottom_right_radius = node.computed_values().border_bottom_right_radius();
-            auto const& border_bottom_left_radius = node.computed_values().border_bottom_left_radius();
-
-            auto radii_data = normalized_border_radii_data(node, border_rect, border_top_left_radius, border_top_right_radius, border_bottom_right_radius, border_bottom_left_radius);
-            paintable_box.set_border_radii_data(radii_data);
-        }
-
-        // Box shadows
-        auto const& box_shadow_data = node.computed_values().box_shadow();
-        if (!box_shadow_data.is_empty()) {
-            Vector<Painting::ShadowData> resolved_box_shadow_data;
-            resolved_box_shadow_data.ensure_capacity(box_shadow_data.size());
-            for (auto const& layer : box_shadow_data) {
-                resolved_box_shadow_data.empend(
-                    layer.color,
-                    layer.offset_x.to_px(node),
-                    layer.offset_y.to_px(node),
-                    layer.blur_radius.to_px(node),
-                    layer.spread_distance.to_px(node),
-                    layer.placement == CSS::ShadowPlacement::Outer ? Painting::ShadowPlacement::Outer : Painting::ShadowPlacement::Inner);
-            }
-
-            if (paintable && is<Painting::PaintableBox>(*paintable)) {
-                auto& paintable_box = static_cast<Painting::PaintableBox&>(*paintable);
-                paintable_box.set_box_shadow_data(move(resolved_box_shadow_data));
-            } else if (paintable && is<Painting::InlinePaintable>(*paintable)) {
-                auto& inline_paintable = static_cast<Painting::InlinePaintable&>(*paintable);
-                inline_paintable.set_box_shadow_data(move(resolved_box_shadow_data));
-            } else {
-                VERIFY_NOT_REACHED();
-            }
-        }
-
-        // Text shadows
-        if (is_paintable_with_lines) {
-            auto const& paintable_with_lines = static_cast<Painting::PaintableWithLines const&>(*paintable);
-            for (auto const& fragment : paintable_with_lines.fragments()) {
-                auto const& text_shadow = fragment.m_layout_node->computed_values().text_shadow();
-                if (!text_shadow.is_empty()) {
-                    Vector<Painting::ShadowData> resolved_shadow_data;
-                    resolved_shadow_data.ensure_capacity(text_shadow.size());
-                    for (auto const& layer : text_shadow) {
-                        resolved_shadow_data.empend(
-                            layer.color,
-                            layer.offset_x.to_px(paintable_with_lines.layout_node()),
-                            layer.offset_y.to_px(paintable_with_lines.layout_node()),
-                            layer.blur_radius.to_px(paintable_with_lines.layout_node()),
-                            layer.spread_distance.to_px(paintable_with_lines.layout_node()),
-                            Painting::ShadowPlacement::Outer);
-                    }
-                    const_cast<Painting::PaintableFragment&>(fragment).set_shadows(move(resolved_shadow_data));
-                }
-            }
-        }
-
-        // Transform and transform origin
-        if (is_paintable_box) {
-            auto& paintable_box = static_cast<Painting::PaintableBox&>(*paintable);
-            auto const& transformations = paintable_box.computed_values().transformations();
-            if (!transformations.is_empty()) {
-                auto matrix = Gfx::FloatMatrix4x4::identity();
-                for (auto const& transform : transformations)
-                    matrix = matrix * transform.to_matrix(paintable_box).release_value();
-                paintable_box.set_transform(matrix);
-            }
-
-            auto const& transform_origin = paintable_box.computed_values().transform_origin();
-            // FIXME: respect transform-box property
-            auto const& reference_box = paintable_box.absolute_border_box_rect();
-            auto x = reference_box.left() + transform_origin.x.to_px(node, reference_box.width());
-            auto y = reference_box.top() + transform_origin.y.to_px(node, reference_box.height());
-            paintable_box.set_transform_origin({ x, y });
-            paintable_box.set_transform_origin({ x, y });
-        }
-    }
-}
-
 void LayoutState::commit(Box& root)
 {
     // Only the top-level LayoutState should ever be committed.
@@ -388,7 +210,11 @@ void LayoutState::commit(Box& root)
     //       when text paintables shift around in the tree.
     root.for_each_in_inclusive_subtree([&](Layout::Node& node) {
         node.set_paintable(nullptr);
-        return IterationDecision::Continue;
+        return TraversalDecision::Continue;
+    });
+    root.document().for_each_shadow_including_inclusive_descendant([&](DOM::Node& node) {
+        node.set_paintable(nullptr);
+        return TraversalDecision::Continue;
     });
 
     HashTable<Layout::TextNode*> text_nodes;
@@ -507,8 +333,20 @@ void LayoutState::commit(Box& root)
         paintable_with_lines.set_fragments(move(fragments_with_inline_paintables_removed));
     }
 
-    for (auto* text_node : text_nodes)
+    for (auto* text_node : text_nodes) {
         text_node->set_paintable(text_node->create_paintable());
+        auto* paintable = text_node->paintable();
+        auto const& font = text_node->first_available_font();
+        auto const glyph_height = CSSPixels::nearest_value_for(font.pixel_size());
+        auto const css_line_thickness = [&] {
+            auto computed_thickness = text_node->computed_values().text_decoration_thickness().resolved(*text_node, CSS::Length(1, CSS::Length::Type::Em).to_px(*text_node));
+            if (computed_thickness.is_auto())
+                return max(glyph_height.scaled(0.1), 1);
+            return computed_thickness.to_px(*text_node);
+        }();
+        auto& text_paintable = static_cast<Painting::TextPaintable&>(*paintable);
+        text_paintable.set_text_decoration_thickness(css_line_thickness);
+    }
 
     build_paint_tree(root);
 
@@ -521,9 +359,14 @@ void LayoutState::commit(Box& root)
             continue;
         auto const& box = static_cast<Layout::Box const&>(used_values.node());
         measure_scrollable_overflow(box);
-    }
 
-    resolve_layout_dependent_properties();
+        // The scroll offset can become invalid if the scrollable overflow rectangle has changed after layout.
+        // For example, if the scroll container has been scrolled to the very end and is then resized to become larger
+        // (scrollable overflow rect become smaller), the scroll offset would be out of bounds.
+        auto& paintable_box = const_cast<Painting::PaintableBox&>(*box.paintable_box());
+        if (!paintable_box.scroll_offset().is_zero())
+            paintable_box.set_scroll_offset(paintable_box.scroll_offset());
+    }
 }
 
 void LayoutState::UsedValues::set_node(NodeWithStyle& node, UsedValues const* containing_block_used_values)
@@ -625,7 +468,6 @@ void LayoutState::UsedValues::set_node(NodeWithStyle& node, UsedValues const* co
             }
             return false;
         }
-        // FIXME: Determine if calc() value is definite.
         return false;
     };
 
@@ -641,6 +483,23 @@ void LayoutState::UsedValues::set_node(NodeWithStyle& node, UsedValues const* co
 
     m_has_definite_width = is_definite_size(computed_values.width(), m_content_width, true);
     m_has_definite_height = is_definite_size(computed_values.height(), m_content_height, false);
+
+    // For boxes with a preferred aspect ratio and one definite size, we can infer the other size
+    // and consider it definite since this did not require performing layout.
+    if (is<Box>(node)) {
+        auto const& box = static_cast<Box const&>(node);
+        if (auto aspect_ratio = box.preferred_aspect_ratio(); aspect_ratio.has_value()) {
+            if (m_has_definite_width && m_has_definite_height) {
+                // Both width and height are definite.
+            } else if (m_has_definite_width) {
+                m_content_height = m_content_width / *aspect_ratio;
+                m_has_definite_height = true;
+            } else if (m_has_definite_height) {
+                m_content_width = m_content_height * *aspect_ratio;
+                m_has_definite_width = true;
+            }
+        }
+    }
 
     if (m_has_definite_width) {
         if (has_definite_min_width)
@@ -666,6 +525,8 @@ void LayoutState::UsedValues::set_content_width(CSSPixels width)
         width = 0;
     }
     m_content_width = width;
+    // FIXME: We should not do this! Definiteness of widths should be determined early,
+    //        and not changed later (except for some special cases in flex layout..)
     m_has_definite_width = true;
 }
 
@@ -678,7 +539,6 @@ void LayoutState::UsedValues::set_content_height(CSSPixels height)
         height = 0;
     }
     m_content_height = height;
-    m_has_definite_height = true;
 }
 
 void LayoutState::UsedValues::set_temporary_content_width(CSSPixels width)

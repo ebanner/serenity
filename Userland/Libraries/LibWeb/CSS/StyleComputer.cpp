@@ -2,6 +2,7 @@
  * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, the SerenityOS developers.
  * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2024, Matthew Olsson <mattco@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -12,6 +13,7 @@
 #include <AK/Find.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
+#include <AK/Math.h>
 #include <AK/QuickSort.h>
 #include <AK/TemporaryChange.h>
 #include <LibGfx/Font/Font.h>
@@ -22,6 +24,11 @@
 #include <LibGfx/Font/VectorFont.h>
 #include <LibGfx/Font/WOFF/Font.h>
 #include <LibGfx/Font/WOFF2/Font.h>
+#include <LibWeb/Animations/AnimationEffect.h>
+#include <LibWeb/Animations/DocumentTimeline.h>
+#include <LibWeb/Animations/TimingFunction.h>
+#include <LibWeb/CSS/AnimationEvent.h>
+#include <LibWeb/CSS/CSSAnimation.h>
 #include <LibWeb/CSS/CSSFontFaceRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
@@ -36,6 +43,7 @@
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/EasingStyleValue.h>
 #include <LibWeb/CSS/StyleValues/FilterValueListStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FrequencyStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackPlacementStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IdentifierStyleValue.h>
@@ -45,23 +53,31 @@
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/RatioStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RectStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StringStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
+#include <LibWeb/CSS/StyleValues/TransitionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnsetStyleValue.h>
+#include <LibWeb/DOM/Attr.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/HTML/HTMLBRElement.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
+#include <LibWeb/HTML/Parser/HTMLParser.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
+#include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Layout/Node.h>
-#include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Platform/FontPlugin.h>
 #include <LibWeb/ReferrerPolicy/AbstractOperations.h>
+#include <math.h>
 #include <stdio.h>
 
 namespace AK {
@@ -77,7 +93,6 @@ struct Traits<Web::CSS::FontFaceKey> : public DefaultTraits<Web::CSS::FontFaceKe
 namespace Web::CSS {
 
 static DOM::Element const* element_to_inherit_style_from(DOM::Element const*, Optional<CSS::Selector::PseudoElement::Type>);
-static NonnullRefPtr<StyleValue const> get_inherit_value(JS::Realm& initial_value_context_realm, CSS::PropertyID, DOM::Element const*, Optional<CSS::Selector::PseudoElement::Type>);
 
 StyleComputer::StyleComputer(DOM::Document& document)
     : m_document(document)
@@ -88,95 +103,98 @@ StyleComputer::StyleComputer(DOM::Document& document)
 
 StyleComputer::~StyleComputer() = default;
 
-class StyleComputer::FontLoader : public ResourceClient {
-public:
-    explicit FontLoader(StyleComputer& style_computer, FlyString family_name, Vector<Gfx::UnicodeRange> unicode_ranges, Vector<AK::URL> urls)
-        : m_style_computer(style_computer)
-        , m_family_name(move(family_name))
-        , m_unicode_ranges(move(unicode_ranges))
-        , m_urls(move(urls))
-    {
+FontLoader::FontLoader(StyleComputer& style_computer, FlyString family_name, Vector<Gfx::UnicodeRange> unicode_ranges, Vector<URL::URL> urls, Function<void(FontLoader const&)> on_load, Function<void()> on_fail)
+    : m_style_computer(style_computer)
+    , m_family_name(move(family_name))
+    , m_unicode_ranges(move(unicode_ranges))
+    , m_urls(move(urls))
+    , m_on_load(move(on_load))
+    , m_on_fail(move(on_fail))
+{
+}
+
+FontLoader::~FontLoader() = default;
+
+void FontLoader::resource_did_load()
+{
+    auto result = try_load_font();
+    if (result.is_error()) {
+        dbgln("Failed to parse font: {}", result.error());
+        start_loading_next_url();
+        return;
     }
+    m_vector_font = result.release_value();
+    m_style_computer.did_load_font(m_family_name);
+    if (m_on_load)
+        m_on_load(*this);
+}
 
-    virtual ~FontLoader() override { }
-
-    Vector<Gfx::UnicodeRange> const& unicode_ranges() const { return m_unicode_ranges; }
-
-    virtual void resource_did_load() override
-    {
-        auto result = try_load_font();
-        if (result.is_error())
-            return start_loading_next_url();
-        m_vector_font = result.release_value();
-        m_style_computer.did_load_font(m_family_name);
+void FontLoader::resource_did_fail()
+{
+    if (m_on_fail) {
+        m_on_fail();
     }
+}
 
-    virtual void resource_did_fail() override
-    {
+RefPtr<Gfx::Font> FontLoader::font_with_point_size(float point_size)
+{
+    if (!m_vector_font) {
+        start_loading_next_url();
+        return nullptr;
     }
+    return m_vector_font->scaled_font(point_size);
+}
 
-    RefPtr<Gfx::Font> font_with_point_size(float point_size)
-    {
-        if (!m_vector_font) {
-            start_loading_next_url();
-            return nullptr;
+void FontLoader::start_loading_next_url()
+{
+    if (resource() && resource()->is_pending())
+        return;
+    if (m_urls.is_empty())
+        return;
+    LoadRequest request;
+    request.set_url(m_urls.take_first());
+
+    // HACK: We're crudely computing the referer value and shoving it into the
+    //       request until fetch infrastructure is used here.
+    auto referrer_url = ReferrerPolicy::strip_url_for_use_as_referrer(m_style_computer.document().url());
+    if (referrer_url.has_value() && !request.headers().contains("Referer"))
+        request.set_header("Referer", referrer_url->serialize());
+
+    set_resource(ResourceLoader::the().load_resource(Resource::Type::Generic, request));
+}
+
+ErrorOr<NonnullRefPtr<Gfx::VectorFont>> FontLoader::try_load_font()
+{
+    // FIXME: This could maybe use the format() provided in @font-face as well, since often the mime type is just application/octet-stream and we have to try every format
+    auto const& mime_type = resource()->mime_type();
+    if (mime_type == "font/ttf"sv || mime_type == "application/x-font-ttf"sv) {
+        if (auto result = OpenType::Font::try_load_from_externally_owned_memory(resource()->encoded_data()); !result.is_error()) {
+            return result;
         }
-        return m_vector_font->scaled_font(point_size);
     }
-
-private:
-    void start_loading_next_url()
-    {
-        if (resource() && resource()->is_pending())
-            return;
-        if (m_urls.is_empty())
-            return;
-        LoadRequest request;
-        request.set_url(m_urls.take_first());
-
-        // HACK: We're crudely computing the referer value and shoving it into the
-        //       request until fetch infrastructure is used here.
-        auto referrer_url = ReferrerPolicy::strip_url_for_use_as_referrer(m_style_computer.document().url());
-        if (referrer_url.has_value() && !request.headers().contains("Referer"))
-            request.set_header("Referer", referrer_url->serialize());
-
-        set_resource(ResourceLoader::the().load_resource(Resource::Type::Generic, request));
-    }
-
-    ErrorOr<NonnullRefPtr<Gfx::VectorFont>> try_load_font()
-    {
-        // FIXME: This could maybe use the format() provided in @font-face as well, since often the mime type is just application/octet-stream and we have to try every format
-        auto mime_type = resource()->mime_type();
-        if (mime_type == "font/ttf"sv || mime_type == "application/x-font-ttf"sv)
-            return TRY(OpenType::Font::try_load_from_externally_owned_memory(resource()->encoded_data()));
-        if (mime_type == "font/woff"sv || mime_type == "application/font-woff"sv)
-            return TRY(WOFF::Font::try_load_from_externally_owned_memory(resource()->encoded_data()));
-        if (mime_type == "font/woff2"sv || mime_type == "application/font-woff2"sv) {
-            auto woff2 = WOFF2::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
-            if (woff2.is_error()) {
-                dbgln("WOFF2 error: {}", woff2.error());
-                return woff2.release_error();
-            }
-            return woff2.release_value();
+    if (mime_type == "font/woff"sv || mime_type == "application/font-woff"sv) {
+        if (auto result = WOFF::Font::try_load_from_externally_owned_memory(resource()->encoded_data()); !result.is_error()) {
+            return result;
         }
-        auto ttf = OpenType::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
-        if (!ttf.is_error())
-            return ttf.release_value();
-        auto woff = WOFF::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
-        if (!woff.is_error())
-            return woff.release_value();
-        auto woff2 = WOFF2::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
-        if (!woff2.is_error())
-            return woff2.release_value();
-        return woff2.release_error();
+    }
+    if (mime_type == "font/woff2"sv || mime_type == "application/font-woff2"sv) {
+        if (auto result = WOFF2::Font::try_load_from_externally_owned_memory(resource()->encoded_data()); !result.is_error()) {
+            return result;
+        }
     }
 
-    StyleComputer& m_style_computer;
-    FlyString m_family_name;
-    Vector<Gfx::UnicodeRange> m_unicode_ranges;
-    RefPtr<Gfx::VectorFont> m_vector_font;
-    Vector<AK::URL> m_urls;
-};
+    // We don't have the luxury of knowing the MIME type, so we have to try all formats.
+    auto ttf = OpenType::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
+    if (!ttf.is_error())
+        return ttf.release_value();
+    auto woff = WOFF::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
+    if (!woff.is_error())
+        return woff.release_value();
+    auto woff2 = WOFF2::Font::try_load_from_externally_owned_memory(resource()->encoded_data());
+    if (!woff2.is_error())
+        return woff2.release_value();
+    return Error::from_string_literal("Automatic format detection failed");
+}
 
 struct StyleComputer::MatchingFontCandidate {
     FontFaceKey key;
@@ -243,19 +261,26 @@ template<typename Callback>
 void StyleComputer::for_each_stylesheet(CascadeOrigin cascade_origin, Callback callback) const
 {
     if (cascade_origin == CascadeOrigin::UserAgent) {
-        callback(default_stylesheet(document()));
+        callback(default_stylesheet(document()), {});
         if (document().in_quirks_mode())
-            callback(quirks_mode_stylesheet(document()));
-        callback(mathml_stylesheet(document()));
-        callback(svg_stylesheet(document()));
+            callback(quirks_mode_stylesheet(document()), {});
+        callback(mathml_stylesheet(document()), {});
+        callback(svg_stylesheet(document()), {});
     }
     if (cascade_origin == CascadeOrigin::User) {
         if (m_user_style_sheet)
-            callback(*m_user_style_sheet);
+            callback(*m_user_style_sheet, {});
     }
     if (cascade_origin == CascadeOrigin::Author) {
-        for (auto const& sheet : document().style_sheets().sheets())
-            callback(*sheet);
+        document().for_each_css_style_sheet([&](CSSStyleSheet& sheet) {
+            callback(sheet, {});
+        });
+
+        const_cast<DOM::Document&>(document()).for_each_shadow_root([&](DOM::ShadowRoot& shadow_root) {
+            shadow_root.for_each_css_style_sheet([&](CSSStyleSheet& sheet) {
+                callback(sheet, &shadow_root);
+            });
+        });
     }
 }
 
@@ -276,29 +301,43 @@ StyleComputer::RuleCache const& StyleComputer::rule_cache_for_cascade_origin(Cas
 [[nodiscard]] static bool filter_namespace_rule(DOM::Element const& element, MatchingRule const& rule)
 {
     // FIXME: Filter out non-default namespace using prefixes
-    auto namespace_uri = rule.sheet->default_namespace();
-    if (namespace_uri.has_value() && namespace_uri.value() != element.namespace_uri()) {
-        return false;
+    if (auto namespace_rule = rule.sheet->default_namespace_rule()) {
+        if (namespace_rule->namespace_uri() != element.namespace_uri())
+            return false;
     }
     return true;
 }
 
+bool StyleComputer::should_reject_with_ancestor_filter(Selector const& selector) const
+{
+    for (u32 hash : selector.ancestor_hashes()) {
+        if (hash == 0)
+            break;
+        if (!m_ancestor_filter.may_contain(hash))
+            return true;
+    }
+    return false;
+}
+
 Vector<MatchingRule> StyleComputer::collect_matching_rules(DOM::Element const& element, CascadeOrigin cascade_origin, Optional<CSS::Selector::PseudoElement::Type> pseudo_element) const
 {
+    auto const& root_node = element.root();
+    auto shadow_root = is<DOM::ShadowRoot>(root_node) ? static_cast<DOM::ShadowRoot const*>(&root_node) : nullptr;
+
     auto const& rule_cache = rule_cache_for_cascade_origin(cascade_origin);
 
-    Vector<MatchingRule> rules_to_run;
+    Vector<MatchingRule, 512> rules_to_run;
     auto add_rules_to_run = [&](Vector<MatchingRule> const& rules) {
         rules_to_run.grow_capacity(rules_to_run.size() + rules.size());
         if (pseudo_element.has_value()) {
             for (auto const& rule : rules) {
                 if (rule.contains_pseudo_element && filter_namespace_rule(element, rule))
-                    rules_to_run.append(rule);
+                    rules_to_run.unchecked_append(rule);
             }
         } else {
             for (auto const& rule : rules) {
-                if (filter_namespace_rule(element, rule))
-                    rules_to_run.append(rule);
+                if (!rule.contains_pseudo_element && filter_namespace_rule(element, rule))
+                    rules_to_run.unchecked_append(rule);
             }
         }
     };
@@ -313,14 +352,41 @@ Vector<MatchingRule> StyleComputer::collect_matching_rules(DOM::Element const& e
     }
     if (auto it = rule_cache.rules_by_tag_name.find(element.local_name()); it != rule_cache.rules_by_tag_name.end())
         add_rules_to_run(it->value);
+    if (pseudo_element.has_value())
+        add_rules_to_run(rule_cache.pseudo_element_rules);
+    if (element.is_document_element())
+        add_rules_to_run(rule_cache.root_rules);
+
+    element.for_each_attribute([&](auto& name, auto&) {
+        if (auto it = rule_cache.rules_by_attribute_name.find(name); it != rule_cache.rules_by_attribute_name.end()) {
+            add_rules_to_run(it->value);
+        }
+    });
+
     add_rules_to_run(rule_cache.other_rules);
 
     Vector<MatchingRule> matching_rules;
     matching_rules.ensure_capacity(rules_to_run.size());
     for (auto const& rule_to_run : rules_to_run) {
+        // FIXME: This needs to be revised when adding support for the :host and ::shadow selectors, which transition shadow tree boundaries
+        auto rule_root = rule_to_run.shadow_root;
+        auto from_user_agent_or_user_stylesheet = rule_to_run.cascade_origin == CascadeOrigin::UserAgent || rule_to_run.cascade_origin == CascadeOrigin::User;
+        if (rule_root != shadow_root && !from_user_agent_or_user_stylesheet)
+            continue;
+
         auto const& selector = rule_to_run.rule->selectors()[rule_to_run.selector_index];
-        if (SelectorEngine::matches(selector, *rule_to_run.sheet, element, pseudo_element))
-            matching_rules.append(rule_to_run);
+
+        if (should_reject_with_ancestor_filter(*selector))
+            continue;
+
+        if (rule_to_run.can_use_fast_matches) {
+            if (!SelectorEngine::fast_matches(selector, *rule_to_run.sheet, element))
+                continue;
+        } else {
+            if (!SelectorEngine::matches(selector, *rule_to_run.sheet, element, pseudo_element))
+                continue;
+        }
+        matching_rules.append(rule_to_run);
     }
     return matching_rules;
 }
@@ -332,7 +398,7 @@ static void sort_matching_rules(Vector<MatchingRule>& matching_rules)
         auto const& b_selector = b.rule->selectors()[b.selector_index];
         auto a_specificity = a_selector->specificity();
         auto b_specificity = b_selector->specificity();
-        if (a_selector->specificity() == b_selector->specificity()) {
+        if (a_specificity == b_specificity) {
             if (a.style_sheet_index == b.style_sheet_index)
                 return a.rule_index < b.rule_index;
             return a.style_sheet_index < b.style_sheet_index;
@@ -341,18 +407,8 @@ static void sort_matching_rules(Vector<MatchingRule>& matching_rules)
     });
 }
 
-static void set_property_expanding_shorthands(StyleProperties& style, CSS::PropertyID property_id, StyleValue const& value, DOM::Document& document, CSS::CSSStyleDeclaration const* declaration, StyleProperties::PropertyValues const& properties_for_revert)
+void StyleComputer::for_each_property_expanding_shorthands(PropertyID property_id, StyleValue const& value, AllowUnresolved allow_unresolved, Function<void(PropertyID, StyleValue const&)> const& set_longhand_property)
 {
-    auto set_longhand_property = [&](CSS::PropertyID property_id, StyleValue const& value) {
-        if (value.is_revert()) {
-            auto& property_in_previous_cascade_origin = properties_for_revert[to_underlying(property_id)];
-            if (property_in_previous_cascade_origin.has_value())
-                style.set_property(property_id, property_in_previous_cascade_origin->style, property_in_previous_cascade_origin->declaration);
-        } else {
-            style.set_property(property_id, value, declaration);
-        }
-    };
-
     auto map_logical_property_to_real_property = [](PropertyID property_id) -> Optional<PropertyID> {
         // FIXME: Honor writing-mode, direction and text-orientation.
         switch (property_id) {
@@ -372,6 +428,8 @@ static void set_property_expanding_shorthands(StyleProperties& style, CSS::Prope
             return PropertyID::PaddingLeft;
         case PropertyID::PaddingInlineEnd:
             return PropertyID::PaddingRight;
+        case PropertyID::InlineSize:
+            return PropertyID::Width;
         case PropertyID::InsetBlockStart:
             return PropertyID::Top;
         case PropertyID::InsetBlockEnd:
@@ -411,19 +469,21 @@ static void set_property_expanding_shorthands(StyleProperties& style, CSS::Prope
         }
     };
 
-    if (auto real_property_id = map_logical_property_to_real_property(property_id); real_property_id.has_value())
-        return set_property_expanding_shorthands(style, real_property_id.value(), value, document, declaration, properties_for_revert);
+    if (auto real_property_id = map_logical_property_to_real_property(property_id); real_property_id.has_value()) {
+        for_each_property_expanding_shorthands(real_property_id.value(), value, allow_unresolved, set_longhand_property);
+        return;
+    }
 
     if (auto real_property_ids = map_logical_property_to_real_properties(property_id); real_property_ids.has_value()) {
         if (value.is_value_list() && value.as_value_list().size() == 2) {
             auto const& start = value.as_value_list().values()[0];
             auto const& end = value.as_value_list().values()[1];
-            set_property_expanding_shorthands(style, real_property_ids->start, start, document, declaration, properties_for_revert);
-            set_property_expanding_shorthands(style, real_property_ids->end, end, document, declaration, properties_for_revert);
+            for_each_property_expanding_shorthands(real_property_ids->start, start, allow_unresolved, set_longhand_property);
+            for_each_property_expanding_shorthands(real_property_ids->end, end, allow_unresolved, set_longhand_property);
             return;
         }
-        set_property_expanding_shorthands(style, real_property_ids->start, value, document, declaration, properties_for_revert);
-        set_property_expanding_shorthands(style, real_property_ids->end, value, document, declaration, properties_for_revert);
+        for_each_property_expanding_shorthands(real_property_ids->start, value, allow_unresolved, set_longhand_property);
+        for_each_property_expanding_shorthands(real_property_ids->end, value, allow_unresolved, set_longhand_property);
         return;
     }
 
@@ -432,7 +492,7 @@ static void set_property_expanding_shorthands(StyleProperties& style, CSS::Prope
         auto& properties = shorthand_value.sub_properties();
         auto& values = shorthand_value.values();
         for (size_t i = 0; i < properties.size(); ++i)
-            set_property_expanding_shorthands(style, properties[i], values[i], document, declaration, properties_for_revert);
+            for_each_property_expanding_shorthands(properties[i], values[i], allow_unresolved, set_longhand_property);
         return;
     }
 
@@ -461,10 +521,10 @@ static void set_property_expanding_shorthands(StyleProperties& style, CSS::Prope
     };
 
     if (property_id == CSS::PropertyID::Border) {
-        set_property_expanding_shorthands(style, CSS::PropertyID::BorderTop, value, document, declaration, properties_for_revert);
-        set_property_expanding_shorthands(style, CSS::PropertyID::BorderRight, value, document, declaration, properties_for_revert);
-        set_property_expanding_shorthands(style, CSS::PropertyID::BorderBottom, value, document, declaration, properties_for_revert);
-        set_property_expanding_shorthands(style, CSS::PropertyID::BorderLeft, value, document, declaration, properties_for_revert);
+        for_each_property_expanding_shorthands(CSS::PropertyID::BorderTop, value, allow_unresolved, set_longhand_property);
+        for_each_property_expanding_shorthands(CSS::PropertyID::BorderRight, value, allow_unresolved, set_longhand_property);
+        for_each_property_expanding_shorthands(CSS::PropertyID::BorderBottom, value, allow_unresolved, set_longhand_property);
+        for_each_property_expanding_shorthands(CSS::PropertyID::BorderLeft, value, allow_unresolved, set_longhand_property);
         // FIXME: Also reset border-image, in line with the spec: https://www.w3.org/TR/css-backgrounds-3/#border-shorthands
         return;
     }
@@ -627,45 +687,89 @@ static void set_property_expanding_shorthands(StyleProperties& style, CSS::Prope
         return;
     }
 
+    if (property_id == CSS::PropertyID::Transition) {
+        if (!value.is_transition()) {
+            // Handle `none` as a shorthand for `all 0s ease 0s`.
+            set_longhand_property(CSS::PropertyID::TransitionProperty, IdentifierStyleValue::create(CSS::ValueID::All));
+            set_longhand_property(CSS::PropertyID::TransitionDuration, TimeStyleValue::create(CSS::Time::make_seconds(0)));
+            set_longhand_property(CSS::PropertyID::TransitionDelay, TimeStyleValue::create(CSS::Time::make_seconds(0)));
+            set_longhand_property(CSS::PropertyID::TransitionTimingFunction, IdentifierStyleValue::create(CSS::ValueID::Ease));
+            return;
+        }
+        auto const& transitions = value.as_transition().transitions();
+        Array<Vector<ValueComparingNonnullRefPtr<StyleValue const>>, 4> transition_values;
+        for (auto const& transition : transitions) {
+            transition_values[0].append(*transition.property_name);
+            transition_values[1].append(transition.duration.as_style_value());
+            transition_values[2].append(transition.delay.as_style_value());
+            if (transition.easing)
+                transition_values[3].append(*transition.easing);
+        }
+
+        set_longhand_property(CSS::PropertyID::TransitionProperty, StyleValueList::create(move(transition_values[0]), StyleValueList::Separator::Comma));
+        set_longhand_property(CSS::PropertyID::TransitionDuration, StyleValueList::create(move(transition_values[1]), StyleValueList::Separator::Comma));
+        set_longhand_property(CSS::PropertyID::TransitionDelay, StyleValueList::create(move(transition_values[2]), StyleValueList::Separator::Comma));
+        set_longhand_property(CSS::PropertyID::TransitionTimingFunction, StyleValueList::create(move(transition_values[3]), StyleValueList::Separator::Comma));
+        return;
+    }
+
     if (property_is_shorthand(property_id)) {
         // ShorthandStyleValue was handled already.
         // That means if we got here, that `value` must be a CSS-wide keyword, which we should apply to our longhand properties.
         // We don't directly call `set_longhand_property()` because the longhands might have longhands of their own.
         // (eg `grid` -> `grid-template` -> `grid-template-areas` & `grid-template-rows` & `grid-template-columns`)
-        VERIFY(value.is_css_wide_keyword());
+        // Forget this requirement if we're ignoring unresolved values and the value is unresolved.
+        VERIFY(value.is_css_wide_keyword() || (allow_unresolved == AllowUnresolved::Yes && value.is_unresolved()));
         for (auto longhand : longhands_for_shorthand(property_id))
-            set_property_expanding_shorthands(style, longhand, value, document, declaration, properties_for_revert);
+            for_each_property_expanding_shorthands(longhand, value, allow_unresolved, set_longhand_property);
         return;
     }
 
     set_longhand_property(property_id, value);
 }
 
-void StyleComputer::set_all_properties(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, StyleProperties& style, StyleValue const& value, DOM::Document& document, CSS::CSSStyleDeclaration const* declaration, StyleProperties::PropertyValues const& properties_for_revert) const
+void StyleComputer::set_property_expanding_shorthands(StyleProperties& style, CSS::PropertyID property_id, StyleValue const& value, CSS::CSSStyleDeclaration const* declaration, StyleProperties::PropertyValues const& properties_for_revert, StyleProperties::Important important)
+{
+    for_each_property_expanding_shorthands(property_id, value, AllowUnresolved::No, [&](PropertyID shorthand_id, StyleValue const& shorthand_value) {
+        if (shorthand_value.is_revert()) {
+            auto& property_in_previous_cascade_origin = properties_for_revert[to_underlying(shorthand_id)];
+            if (property_in_previous_cascade_origin.style)
+                style.set_property(shorthand_id, *property_in_previous_cascade_origin.style, property_in_previous_cascade_origin.declaration, StyleProperties::Inherited::No, important);
+        } else {
+            style.set_property(shorthand_id, shorthand_value, declaration, StyleProperties::Inherited::No, important);
+        }
+    });
+}
+
+void StyleComputer::set_all_properties(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, StyleProperties& style, StyleValue const& value, DOM::Document& document, CSS::CSSStyleDeclaration const* declaration, StyleProperties::PropertyValues const& properties_for_revert, StyleProperties::Important important) const
 {
     for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
         auto property_id = (CSS::PropertyID)i;
 
         if (value.is_revert()) {
             style.m_property_values[to_underlying(property_id)] = properties_for_revert[to_underlying(property_id)];
+            style.m_property_values[to_underlying(property_id)].important = important;
             continue;
         }
 
         if (value.is_unset()) {
             if (is_inherited_property(property_id))
-                style.m_property_values[to_underlying(property_id)] = { { get_inherit_value(document.realm(), property_id, &element, pseudo_element), nullptr } };
+                style.m_property_values[to_underlying(property_id)] = { get_inherit_value(document.realm(), property_id, &element, pseudo_element), nullptr };
             else
-                style.m_property_values[to_underlying(property_id)] = { { property_initial_value(document.realm(), property_id), nullptr } };
+                style.m_property_values[to_underlying(property_id)] = { property_initial_value(document.realm(), property_id), nullptr };
+            style.m_property_values[to_underlying(property_id)].important = important;
             continue;
         }
 
         NonnullRefPtr<StyleValue> property_value = value;
         if (property_value->is_unresolved())
-            property_value = Parser::Parser::resolve_unresolved_style_value({}, Parser::ParsingContext { document }, element, pseudo_element, property_id, property_value->as_unresolved());
+            property_value = Parser::Parser::resolve_unresolved_style_value(Parser::ParsingContext { document }, element, pseudo_element, property_id, property_value->as_unresolved());
         if (!property_value->is_unresolved())
-            set_property_expanding_shorthands(style, property_id, property_value, document, declaration, properties_for_revert);
+            set_property_expanding_shorthands(style, property_id, property_value, declaration, properties_for_revert);
 
-        set_property_expanding_shorthands(style, property_id, value, document, declaration, properties_for_revert);
+        style.m_property_values[to_underlying(property_id)].important = important;
+
+        set_property_expanding_shorthands(style, property_id, value, declaration, properties_for_revert, important);
     }
 }
 
@@ -674,192 +778,589 @@ void StyleComputer::cascade_declarations(StyleProperties& style, DOM::Element& e
     auto properties_for_revert = style.properties();
 
     for (auto const& match : matching_rules) {
-        for (auto const& property : verify_cast<PropertyOwningCSSStyleDeclaration>(match.rule->declaration()).properties()) {
+        for (auto const& property : match.rule->declaration().properties()) {
             if (important != property.important)
                 continue;
 
             if (property.property_id == CSS::PropertyID::All) {
-                set_all_properties(element, pseudo_element, style, property.value, m_document, &match.rule->declaration(), properties_for_revert);
+                set_all_properties(element, pseudo_element, style, property.value, m_document, &match.rule->declaration(), properties_for_revert, important == Important::Yes ? StyleProperties::Important::Yes : StyleProperties::Important::No);
                 continue;
             }
 
             auto property_value = property.value;
             if (property.value->is_unresolved())
-                property_value = Parser::Parser::resolve_unresolved_style_value({}, Parser::ParsingContext { document() }, element, pseudo_element, property.property_id, property.value->as_unresolved());
+                property_value = Parser::Parser::resolve_unresolved_style_value(Parser::ParsingContext { document() }, element, pseudo_element, property.property_id, property.value->as_unresolved());
             if (!property_value->is_unresolved())
-                set_property_expanding_shorthands(style, property.property_id, property_value, m_document, &match.rule->declaration(), properties_for_revert);
+                set_property_expanding_shorthands(style, property.property_id, property_value, &match.rule->declaration(), properties_for_revert, important == Important::Yes ? StyleProperties::Important::Yes : StyleProperties::Important::No);
         }
     }
 
     if (cascade_origin == CascadeOrigin::Author && !pseudo_element.has_value()) {
-        if (auto const* inline_style = verify_cast<ElementInlineCSSStyleDeclaration>(element.inline_style())) {
+        if (auto const inline_style = element.inline_style()) {
             for (auto const& property : inline_style->properties()) {
                 if (important != property.important)
                     continue;
 
                 if (property.property_id == CSS::PropertyID::All) {
-                    set_all_properties(element, pseudo_element, style, property.value, m_document, inline_style, properties_for_revert);
+                    set_all_properties(element, pseudo_element, style, property.value, m_document, inline_style, properties_for_revert, important == Important::Yes ? StyleProperties::Important::Yes : StyleProperties::Important::No);
                     continue;
                 }
 
                 auto property_value = property.value;
                 if (property.value->is_unresolved())
-                    property_value = Parser::Parser::resolve_unresolved_style_value({}, Parser::ParsingContext { document() }, element, pseudo_element, property.property_id, property.value->as_unresolved());
+                    property_value = Parser::Parser::resolve_unresolved_style_value(Parser::ParsingContext { document() }, element, pseudo_element, property.property_id, property.value->as_unresolved());
                 if (!property_value->is_unresolved())
-                    set_property_expanding_shorthands(style, property.property_id, property_value, m_document, inline_style, properties_for_revert);
+                    set_property_expanding_shorthands(style, property.property_id, property_value, inline_style, properties_for_revert, important == Important::Yes ? StyleProperties::Important::Yes : StyleProperties::Important::No);
             }
         }
     }
 }
 
-static ErrorOr<void> cascade_custom_properties(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, Vector<MatchingRule> const& matching_rules)
+static void cascade_custom_properties(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, Vector<MatchingRule> const& matching_rules)
 {
     size_t needed_capacity = 0;
     for (auto const& matching_rule : matching_rules)
-        needed_capacity += verify_cast<PropertyOwningCSSStyleDeclaration>(matching_rule.rule->declaration()).custom_properties().size();
+        needed_capacity += matching_rule.rule->declaration().custom_properties().size();
 
     if (!pseudo_element.has_value()) {
-        if (auto const* inline_style = verify_cast<PropertyOwningCSSStyleDeclaration>(element.inline_style()))
+        if (auto const inline_style = element.inline_style())
             needed_capacity += inline_style->custom_properties().size();
     }
 
     HashMap<FlyString, StyleProperty> custom_properties;
-    TRY(custom_properties.try_ensure_capacity(needed_capacity));
+    custom_properties.ensure_capacity(needed_capacity);
 
     for (auto const& matching_rule : matching_rules) {
-        for (auto const& it : verify_cast<PropertyOwningCSSStyleDeclaration>(matching_rule.rule->declaration()).custom_properties())
+        for (auto const& it : matching_rule.rule->declaration().custom_properties())
             custom_properties.set(it.key, it.value);
     }
 
     if (!pseudo_element.has_value()) {
-        if (auto const* inline_style = verify_cast<PropertyOwningCSSStyleDeclaration>(element.inline_style())) {
+        if (auto const inline_style = element.inline_style()) {
             for (auto const& it : inline_style->custom_properties())
                 custom_properties.set(it.key, it.value);
         }
     }
 
     element.set_custom_properties(pseudo_element, move(custom_properties));
-
-    return {};
 }
 
-StyleComputer::AnimationStepTransition StyleComputer::Animation::step(CSS::Time const& time_step)
+static NonnullRefPtr<StyleValue const> interpolate_value(DOM::Element& element, StyleValue const& from, StyleValue const& to, float delta);
+
+template<typename T>
+static T interpolate_raw(T from, T to, float delta)
 {
-    auto delay_ms = remaining_delay.to_milliseconds();
-    auto time_step_ms = time_step.to_milliseconds();
-
-    if (delay_ms > time_step_ms) {
-        remaining_delay = CSS::Time { delay_ms - time_step_ms, CSS::Time::Type::Ms };
-        return AnimationStepTransition::NoTransition;
+    if constexpr (IsSame<T, double>) {
+        return from + (to - from) * static_cast<double>(delta);
+    } else {
+        return static_cast<RemoveCVReference<T>>(from + (to - from) * delta);
     }
-
-    remaining_delay = CSS::Time { 0, CSS::Time::Type::Ms };
-    time_step_ms -= delay_ms;
-
-    // "auto": For time-driven animations, equivalent to 0s.
-    // https://www.w3.org/TR/2023/WD-css-animations-2-20230602/#valdef-animation-duration-auto
-    auto used_duration = duration.value_or(CSS::Time { 0, CSS::Time::Type::S });
-
-    auto added_progress = time_step_ms / used_duration.to_milliseconds();
-    auto new_progress = progress.as_fraction() + added_progress;
-    auto changed_iteration = false;
-    if (new_progress >= 1) {
-        if (iteration_count.has_value()) {
-            if (iteration_count.value() <= 1) {
-                progress = CSS::Percentage(100);
-                return AnimationStepTransition::ActiveToAfter;
-            }
-            --iteration_count.value();
-            changed_iteration = true;
-        }
-        ++current_iteration;
-        new_progress = 0;
-    }
-    progress = CSS::Percentage(new_progress * 100);
-
-    if (changed_iteration)
-        return AnimationStepTransition::ActiveToActiveChangingTheIteration;
-
-    return AnimationStepTransition::AfterToActive;
 }
 
-static ErrorOr<NonnullRefPtr<StyleValue>> interpolate_property(StyleValue const& from, StyleValue const& to, float delta)
+// A null return value means the interpolated matrix was not invertible or otherwise invalid
+static RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, StyleValue const& from, StyleValue const& to, float delta)
+{
+    // Note that the spec uses column-major notation, so all the matrix indexing is reversed.
+
+    static constexpr auto make_transformation = [](TransformationStyleValue const& transformation) -> Optional<Transformation> {
+        Vector<TransformValue> values;
+
+        for (auto const& value : transformation.values()) {
+            switch (value->type()) {
+            case StyleValue::Type::Angle:
+                values.append(AngleOrCalculated { value->as_angle().angle() });
+                break;
+            case StyleValue::Type::Calculated:
+                values.append(LengthPercentage { value->as_calculated() });
+                break;
+            case StyleValue::Type::Length:
+                values.append(LengthPercentage { value->as_length().length() });
+                break;
+            case StyleValue::Type::Percentage:
+                values.append(LengthPercentage { value->as_percentage().percentage() });
+                break;
+            case StyleValue::Type::Number:
+                values.append(NumberPercentage { Number(Number::Type::Number, value->as_number().number()) });
+                break;
+            default:
+                return {};
+            }
+        }
+
+        return Transformation { transformation.transform_function(), move(values) };
+    };
+
+    static constexpr auto transformation_style_value_to_matrix = [](DOM::Element& element, TransformationStyleValue const& value) -> Optional<FloatMatrix4x4> {
+        auto transformation = make_transformation(value.as_transformation());
+        if (!transformation.has_value())
+            return {};
+        Optional<Painting::PaintableBox const&> paintable_box;
+        if (auto layout_node = element.layout_node()) {
+            if (auto paintable = layout_node->paintable(); paintable && is<Painting::PaintableBox>(paintable))
+                paintable_box = *static_cast<Painting::PaintableBox*>(paintable);
+        }
+        if (auto matrix = transformation->to_matrix(paintable_box); !matrix.is_error())
+            return matrix.value();
+        return {};
+    };
+
+    static constexpr auto style_value_to_matrix = [](DOM::Element& element, StyleValue const& value) -> FloatMatrix4x4 {
+        if (value.is_transformation())
+            return transformation_style_value_to_matrix(element, value.as_transformation()).value_or(FloatMatrix4x4::identity());
+
+        // This encompasses both the allowed value "none" and any invalid values
+        if (!value.is_value_list())
+            return FloatMatrix4x4::identity();
+
+        auto matrix = FloatMatrix4x4::identity();
+        for (auto const& value_element : value.as_value_list().values()) {
+            if (value_element->is_transformation()) {
+                if (auto value_matrix = transformation_style_value_to_matrix(element, value_element->as_transformation()); value_matrix.has_value())
+                    matrix = matrix * value_matrix.value();
+            }
+        }
+
+        return matrix;
+    };
+
+    struct DecomposedValues {
+        FloatVector3 translation;
+        FloatVector3 scale;
+        FloatVector3 skew;
+        FloatVector4 rotation;
+        FloatVector4 perspective;
+    };
+    // https://drafts.csswg.org/css-transforms-2/#decomposing-a-3d-matrix
+    static constexpr auto decompose = [](FloatMatrix4x4 matrix) -> Optional<DecomposedValues> {
+        // https://drafts.csswg.org/css-transforms-1/#supporting-functions
+        static constexpr auto combine = [](auto a, auto b, float ascl, float bscl) {
+            return FloatVector3 {
+                ascl * a[0] + bscl * b[0],
+                ascl * a[1] + bscl * b[1],
+                ascl * a[2] + bscl * b[2],
+            };
+        };
+
+        // Normalize the matrix.
+        if (matrix(3, 3) == 0.f)
+            return {};
+
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                matrix(i, j) /= matrix(3, 3);
+
+        // perspectiveMatrix is used to solve for perspective, but it also provides
+        // an easy way to test for singularity of the upper 3x3 component.
+        auto perspective_matrix = matrix;
+        for (int i = 0; i < 3; i++)
+            perspective_matrix(3, i) = 0.f;
+        perspective_matrix(3, 3) = 1.f;
+
+        if (!perspective_matrix.is_invertible())
+            return {};
+
+        DecomposedValues values;
+
+        // First, isolate perspective.
+        if (matrix(3, 0) != 0.f || matrix(3, 1) != 0.f || matrix(3, 2) != 0.f) {
+            // rightHandSide is the right hand side of the equation.
+            // Note: It is the bottom side in a row-major matrix
+            FloatVector4 bottom_side = {
+                matrix(3, 0),
+                matrix(3, 1),
+                matrix(3, 2),
+                matrix(3, 3),
+            };
+
+            // Solve the equation by inverting perspectiveMatrix and multiplying
+            // rightHandSide by the inverse.
+            auto inverse_perspective_matrix = perspective_matrix.inverse();
+            auto transposed_inverse_perspective_matrix = inverse_perspective_matrix.transpose();
+            values.perspective = transposed_inverse_perspective_matrix * bottom_side;
+        } else {
+            // No perspective.
+            values.perspective = { 0.0, 0.0, 0.0, 1.0 };
+        }
+
+        // Next take care of translation
+        for (int i = 0; i < 3; i++)
+            values.translation[i] = matrix(i, 3);
+
+        // Now get scale and shear. 'row' is a 3 element array of 3 component vectors
+        FloatVector3 row[3];
+        for (int i = 0; i < 3; i++)
+            row[i] = { matrix(0, i), matrix(1, i), matrix(2, i) };
+
+        // Compute X scale factor and normalize first row.
+        values.scale[0] = row[0].length();
+        row[0].normalize();
+
+        // Compute XY shear factor and make 2nd row orthogonal to 1st.
+        values.skew[0] = row[0].dot(row[1]);
+        row[1] = combine(row[1], row[0], 1.f, -values.skew[0]);
+
+        // Now, compute Y scale and normalize 2nd row.
+        values.scale[1] = row[1].length();
+        row[1].normalize();
+        values.skew[0] /= values.scale[1];
+
+        // Compute XZ and YZ shears, orthogonalize 3rd row
+        values.skew[1] = row[0].dot(row[2]);
+        row[2] = combine(row[2], row[0], 1.f, -values.skew[1]);
+        values.skew[2] = row[1].dot(row[2]);
+        row[2] = combine(row[2], row[1], 1.f, -values.skew[2]);
+
+        // Next, get Z scale and normalize 3rd row.
+        values.scale[2] = row[2].length();
+        row[2].normalize();
+        values.skew[1] /= values.scale[2];
+        values.skew[2] /= values.scale[2];
+
+        // At this point, the matrix (in rows) is orthonormal.
+        // Check for a coordinate system flip.  If the determinant
+        // is -1, then negate the matrix and the scaling factors.
+        auto pdum3 = row[1].cross(row[2]);
+        if (row[0].dot(pdum3) < 0.f) {
+            for (int i = 0; i < 3; i++) {
+                values.scale[i] *= -1.f;
+                row[i][0] *= -1.f;
+                row[i][1] *= -1.f;
+                row[i][2] *= -1.f;
+            }
+        }
+
+        // Now, get the rotations out
+        values.rotation[0] = 0.5f * sqrt(max(1.f + row[0][0] - row[1][1] - row[2][2], 0.f));
+        values.rotation[1] = 0.5f * sqrt(max(1.f - row[0][0] + row[1][1] - row[2][2], 0.f));
+        values.rotation[2] = 0.5f * sqrt(max(1.f - row[0][0] - row[1][1] + row[2][2], 0.f));
+        values.rotation[3] = 0.5f * sqrt(max(1.f + row[0][0] + row[1][1] + row[2][2], 0.f));
+
+        if (row[2][1] > row[1][2])
+            values.rotation[0] = -values.rotation[0];
+        if (row[0][2] > row[2][0])
+            values.rotation[1] = -values.rotation[1];
+        if (row[1][0] > row[0][1])
+            values.rotation[2] = -values.rotation[2];
+
+        // FIXME: This accounts for the fact that the browser coordinate system is left-handed instead of right-handed.
+        //        The reason for this is that the positive Y-axis direction points down instead of up. To fix this, we
+        //        invert the Y axis. However, it feels like the spec pseudo-code above should have taken something like
+        //        this into account, so we're probably doing something else wrong.
+        values.rotation[2] *= -1;
+
+        return values;
+    };
+
+    // https://drafts.csswg.org/css-transforms-2/#recomposing-to-a-3d-matrix
+    static constexpr auto recompose = [](DecomposedValues const& values) -> FloatMatrix4x4 {
+        auto matrix = FloatMatrix4x4::identity();
+
+        // apply perspective
+        for (int i = 0; i < 4; i++)
+            matrix(3, i) = values.perspective[i];
+
+        // apply translation
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 3; j++)
+                matrix(i, 3) += values.translation[j] * matrix(i, j);
+        }
+
+        // apply rotation
+        auto x = values.rotation[0];
+        auto y = values.rotation[1];
+        auto z = values.rotation[2];
+        auto w = values.rotation[3];
+
+        // Construct a composite rotation matrix from the quaternion values
+        // rotationMatrix is a identity 4x4 matrix initially
+        auto rotation_matrix = FloatMatrix4x4::identity();
+        rotation_matrix(0, 0) = 1.f - 2.f * (y * y + z * z);
+        rotation_matrix(1, 0) = 2.f * (x * y - z * w);
+        rotation_matrix(2, 0) = 2.f * (x * z + y * w);
+        rotation_matrix(0, 1) = 2.f * (x * y + z * w);
+        rotation_matrix(1, 1) = 1.f - 2.f * (x * x + z * z);
+        rotation_matrix(2, 1) = 2.f * (y * z - x * w);
+        rotation_matrix(0, 2) = 2.f * (x * z - y * w);
+        rotation_matrix(1, 2) = 2.f * (y * z + x * w);
+        rotation_matrix(2, 2) = 1.f - 2.f * (x * x + y * y);
+
+        matrix = matrix * rotation_matrix;
+
+        // apply skew
+        // temp is a identity 4x4 matrix initially
+        auto temp = FloatMatrix4x4::identity();
+        if (values.skew[2] != 0.f) {
+            temp(1, 2) = values.skew[2];
+            matrix = matrix * temp;
+        }
+
+        if (values.skew[1] != 0.f) {
+            temp(1, 2) = 0.f;
+            temp(0, 2) = values.skew[1];
+            matrix = matrix * temp;
+        }
+
+        if (values.skew[0] != 0.f) {
+            temp(0, 2) = 0.f;
+            temp(0, 1) = values.skew[0];
+            matrix = matrix * temp;
+        }
+
+        // apply scale
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 4; j++)
+                matrix(j, i) *= values.scale[i];
+        }
+
+        return matrix;
+    };
+
+    // https://drafts.csswg.org/css-transforms-2/#interpolation-of-decomposed-3d-matrix-values
+    static constexpr auto interpolate = [](DecomposedValues& from, DecomposedValues& to, float delta) -> DecomposedValues {
+        auto product = clamp(from.rotation.dot(to.rotation), -1.0f, 1.0f);
+        FloatVector4 interpolated_rotation;
+        if (fabsf(product) == 1.0f) {
+            interpolated_rotation = from.rotation;
+        } else {
+            auto theta = acos(product);
+            auto w = sin(delta * theta) / sqrtf(1.0f - product * product);
+
+            for (int i = 0; i < 4; i++) {
+                from.rotation[i] *= cos(delta * theta) - product * w;
+                to.rotation[i] *= w;
+                interpolated_rotation[i] = from.rotation[i] + to.rotation[i];
+            }
+        }
+
+        return {
+            interpolate_raw(from.translation, to.translation, delta),
+            interpolate_raw(from.scale, to.scale, delta),
+            interpolate_raw(from.skew, to.skew, delta),
+            interpolated_rotation,
+            interpolate_raw(from.perspective, to.perspective, delta),
+        };
+    };
+
+    auto from_matrix = style_value_to_matrix(element, from);
+    auto to_matrix = style_value_to_matrix(element, to);
+    auto from_decomposed = decompose(from_matrix);
+    auto to_decomposed = decompose(to_matrix);
+    if (!from_decomposed.has_value() || !to_decomposed.has_value())
+        return {};
+    auto interpolated_decomposed = interpolate(from_decomposed.value(), to_decomposed.value(), delta);
+    auto interpolated = recompose(interpolated_decomposed);
+
+    StyleValueVector values;
+    values.ensure_capacity(16);
+    for (int i = 0; i < 16; i++)
+        values.append(NumberStyleValue::create(static_cast<double>(interpolated(i % 4, i / 4))));
+    return StyleValueList::create({ TransformationStyleValue::create(TransformFunction::Matrix3d, move(values)) }, StyleValueList::Separator::Comma);
+}
+
+static Color interpolate_color(Color from, Color to, float delta)
+{
+    // https://drafts.csswg.org/css-color/#interpolation-space
+    // If the host syntax does not define what color space interpolation should take place in, it defaults to Oklab.
+    auto from_oklab = from.to_oklab();
+    auto to_oklab = to.to_oklab();
+
+    auto color = Color::from_oklab(
+        interpolate_raw(from_oklab.L, to_oklab.L, delta),
+        interpolate_raw(from_oklab.a, to_oklab.a, delta),
+        interpolate_raw(from_oklab.b, to_oklab.b, delta));
+    color.set_alpha(interpolate_raw(from.alpha(), to.alpha(), delta));
+    return color;
+}
+
+static NonnullRefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, StyleValue const& from, StyleValue const& to, float delta)
+{
+    // https://drafts.csswg.org/css-backgrounds/#box-shadow
+    // Animation type: by computed value, treating none as a zero-item list and appending blank shadows
+    //                 (transparent 0 0 0 0) with a corresponding inset keyword as needed to match the longer list if
+    //                 the shorter list is otherwise compatible with the longer one
+
+    static constexpr auto process_list = [](StyleValue const& value) {
+        StyleValueVector shadows;
+        if (value.is_value_list()) {
+            for (auto const& element : value.as_value_list().values()) {
+                if (element->is_shadow())
+                    shadows.append(element);
+            }
+        } else if (value.is_shadow()) {
+            shadows.append(value);
+        } else if (!value.is_identifier() || value.as_identifier().id() != ValueID::None) {
+            VERIFY_NOT_REACHED();
+        }
+        return shadows;
+    };
+
+    static constexpr auto extend_list_if_necessary = [](StyleValueVector& values, StyleValueVector const& other) {
+        values.ensure_capacity(other.size());
+        for (size_t i = values.size(); i < other.size(); i++) {
+            values.unchecked_append(ShadowStyleValue::create(
+                Color::Transparent,
+                LengthStyleValue::create(Length::make_px(0)),
+                LengthStyleValue::create(Length::make_px(0)),
+                LengthStyleValue::create(Length::make_px(0)),
+                LengthStyleValue::create(Length::make_px(0)),
+                other[i]->as_shadow().placement()));
+        }
+    };
+
+    StyleValueVector from_shadows = process_list(from);
+    StyleValueVector to_shadows = process_list(to);
+
+    extend_list_if_necessary(from_shadows, to_shadows);
+    extend_list_if_necessary(to_shadows, from_shadows);
+
+    VERIFY(from_shadows.size() == to_shadows.size());
+    StyleValueVector result_shadows;
+    result_shadows.ensure_capacity(from_shadows.size());
+
+    for (size_t i = 0; i < from_shadows.size(); i++) {
+        auto const& from_shadow = from_shadows[i]->as_shadow();
+        auto const& to_shadow = to_shadows[i]->as_shadow();
+        auto result_shadow = ShadowStyleValue::create(
+            interpolate_color(from_shadow.color(), to_shadow.color(), delta),
+            interpolate_value(element, from_shadow.offset_x(), to_shadow.offset_x(), delta),
+            interpolate_value(element, from_shadow.offset_y(), to_shadow.offset_y(), delta),
+            interpolate_value(element, from_shadow.blur_radius(), to_shadow.blur_radius(), delta),
+            interpolate_value(element, from_shadow.spread_distance(), to_shadow.spread_distance(), delta),
+            delta >= 0.5f ? to_shadow.placement() : from_shadow.placement());
+        result_shadows.unchecked_append(result_shadow);
+    }
+
+    return StyleValueList::create(move(result_shadows), StyleValueList::Separator::Comma);
+}
+
+static NonnullRefPtr<StyleValue const> interpolate_value(DOM::Element& element, StyleValue const& from, StyleValue const& to, float delta)
 {
     if (from.type() != to.type()) {
-        if (delta > 0.999f)
-            return to;
-        return from;
-    }
+        // Handle mixed percentage and dimension types
+        // https://www.w3.org/TR/css-values-4/#mixed-percentages
 
-    auto interpolate_raw = [delta = static_cast<double>(delta)](auto from, auto to) {
-        return static_cast<RemoveCVReference<decltype(from)>>(static_cast<double>(from) + static_cast<double>(to - from) * delta);
-    };
+        struct NumericBaseTypeAndDefault {
+            CSSNumericType::BaseType base_type;
+            ValueComparingNonnullRefPtr<CSS::StyleValue> default_value;
+        };
+        static constexpr auto numeric_base_type_and_default = [](StyleValue const& value) -> Optional<NumericBaseTypeAndDefault> {
+            switch (value.type()) {
+            case StyleValue::Type::Angle: {
+                static auto default_angle_value = AngleStyleValue::create(Angle::make_degrees(0));
+                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Angle, default_angle_value };
+            }
+            case StyleValue::Type::Frequency: {
+                static auto default_frequency_value = FrequencyStyleValue::create(Frequency::make_hertz(0));
+                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Frequency, default_frequency_value };
+            }
+            case StyleValue::Type::Length: {
+                static auto default_length_value = LengthStyleValue::create(Length::make_px(0));
+                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Length, default_length_value };
+            }
+            case StyleValue::Type::Percentage: {
+                static auto default_percentage_value = PercentageStyleValue::create(Percentage { 0.0 });
+                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Percent, default_percentage_value };
+            }
+            case StyleValue::Type::Time: {
+                static auto default_time_value = TimeStyleValue::create(Time::make_seconds(0));
+                return NumericBaseTypeAndDefault { CSSNumericType::BaseType::Time, default_time_value };
+            }
+            default:
+                return {};
+            }
+        };
+
+        static constexpr auto to_calculation_node = [](StyleValue const& value) -> NonnullOwnPtr<CalculationNode> {
+            switch (value.type()) {
+            case StyleValue::Type::Angle:
+                return NumericCalculationNode::create(value.as_angle().angle());
+            case StyleValue::Type::Frequency:
+                return NumericCalculationNode::create(value.as_frequency().frequency());
+            case StyleValue::Type::Length:
+                return NumericCalculationNode::create(value.as_length().length());
+            case StyleValue::Type::Percentage:
+                return NumericCalculationNode::create(value.as_percentage().percentage());
+            case StyleValue::Type::Time:
+                return NumericCalculationNode::create(value.as_time().time());
+            default:
+                VERIFY_NOT_REACHED();
+            }
+        };
+
+        auto from_base_type_and_default = numeric_base_type_and_default(from);
+        auto to_base_type_and_default = numeric_base_type_and_default(to);
+
+        if (from_base_type_and_default.has_value() && to_base_type_and_default.has_value() && (from_base_type_and_default->base_type == CSSNumericType::BaseType::Percent || to_base_type_and_default->base_type == CSSNumericType::BaseType::Percent)) {
+            // This is an interpolation from a numeric unit to a percentage, or vice versa. The trick here is to
+            // interpolate two separate values. For example, consider an interpolation from 30px to 80%. It's quite
+            // hard to understand how this interpolation works, but if instead we rewrite the values as "30px + 0%" and
+            // "0px + 80%", then it is very simple to understand; we just interpolate each component separately.
+
+            auto interpolated_from = interpolate_value(element, from, from_base_type_and_default->default_value, delta);
+            auto interpolated_to = interpolate_value(element, to_base_type_and_default->default_value, to, delta);
+
+            Vector<NonnullOwnPtr<CalculationNode>> values;
+            values.ensure_capacity(2);
+            values.unchecked_append(to_calculation_node(interpolated_from));
+            values.unchecked_append(to_calculation_node(interpolated_to));
+            auto calc_node = SumCalculationNode::create(move(values));
+            return CalculatedStyleValue::create(move(calc_node), CSSNumericType { to_base_type_and_default->base_type, 1 });
+        }
+
+        return delta >= 0.5f ? to : from;
+    }
 
     switch (from.type()) {
     case StyleValue::Type::Angle:
-        return AngleStyleValue::create(Angle::make_degrees(interpolate_raw(from.as_angle().angle().to_degrees(), to.as_angle().angle().to_degrees())));
-    case StyleValue::Type::Color: {
-        auto from_color = from.as_color().color();
-        auto to_color = to.as_color().color();
-        auto from_hsv = from_color.to_hsv();
-        auto to_hsv = to_color.to_hsv();
-
-        auto color = Color::from_hsv(
-            interpolate_raw(from_hsv.hue, to_hsv.hue),
-            interpolate_raw(from_hsv.saturation, to_hsv.saturation),
-            interpolate_raw(from_hsv.value, to_hsv.value));
-        color.set_alpha(interpolate_raw(from_color.alpha(), to_color.alpha()));
-
-        return ColorStyleValue::create(color);
-    }
+        return AngleStyleValue::create(Angle::make_degrees(interpolate_raw(from.as_angle().angle().to_degrees(), to.as_angle().angle().to_degrees(), delta)));
+    case StyleValue::Type::Color:
+        return ColorStyleValue::create(interpolate_color(from.as_color().color(), to.as_color().color(), delta));
     case StyleValue::Type::Integer:
-        return IntegerStyleValue::create(interpolate_raw(from.as_integer().integer(), to.as_integer().integer()));
+        return IntegerStyleValue::create(interpolate_raw(from.as_integer().integer(), to.as_integer().integer(), delta));
     case StyleValue::Type::Length: {
         auto& from_length = from.as_length().length();
         auto& to_length = to.as_length().length();
-        return LengthStyleValue::create(Length(interpolate_raw(from_length.raw_value(), to_length.raw_value()), from_length.type()));
+        return LengthStyleValue::create(Length(interpolate_raw(from_length.raw_value(), to_length.raw_value(), delta), from_length.type()));
     }
     case StyleValue::Type::Number:
-        return NumberStyleValue::create(interpolate_raw(from.as_number().number(), to.as_number().number()));
+        return NumberStyleValue::create(interpolate_raw(from.as_number().number(), to.as_number().number(), delta));
     case StyleValue::Type::Percentage:
-        return PercentageStyleValue::create(Percentage(interpolate_raw(from.as_percentage().percentage().value(), to.as_percentage().percentage().value())));
+        return PercentageStyleValue::create(Percentage(interpolate_raw(from.as_percentage().percentage().value(), to.as_percentage().percentage().value(), delta)));
     case StyleValue::Type::Position: {
         // https://www.w3.org/TR/css-values-4/#combine-positions
         // FIXME: Interpolation of <position> is defined as the independent interpolation of each component (x, y) normalized as an offset from the top left corner as a <length-percentage>.
         auto& from_position = from.as_position();
         auto& to_position = to.as_position();
         return PositionStyleValue::create(
-            TRY(interpolate_property(from_position.edge_x(), to_position.edge_x(), delta))->as_edge(),
-            TRY(interpolate_property(from_position.edge_y(), to_position.edge_y(), delta))->as_edge());
+            interpolate_value(element, from_position.edge_x(), to_position.edge_x(), delta)->as_edge(),
+            interpolate_value(element, from_position.edge_y(), to_position.edge_y(), delta)->as_edge());
+    }
+    case StyleValue::Type::Ratio: {
+        auto from_ratio = from.as_ratio().ratio();
+        auto to_ratio = to.as_ratio().ratio();
+
+        // The interpolation of a <ratio> is defined by converting each <ratio> to a number by dividing the first value
+        // by the second (so a ratio of 3 / 2 would become 1.5), taking the logarithm of that result (so the 1.5 would
+        // become approximately 0.176), then interpolating those values. The result during the interpolation is
+        // converted back to a <ratio> by inverting the logarithm, then interpreting the result as a <ratio> with the
+        // result as the first value and 1 as the second value.
+        auto from_number = log(from_ratio.value());
+        auto to_number = log(to_ratio.value());
+        auto interp_number = interpolate_raw(from_number, to_number, delta);
+        return RatioStyleValue::create(Ratio(pow(M_E, interp_number)));
     }
     case StyleValue::Type::Rect: {
         auto from_rect = from.as_rect().rect();
         auto to_rect = to.as_rect().rect();
         return RectStyleValue::create({
-            Length(interpolate_raw(from_rect.top_edge.raw_value(), to_rect.top_edge.raw_value()), from_rect.top_edge.type()),
-            Length(interpolate_raw(from_rect.right_edge.raw_value(), to_rect.right_edge.raw_value()), from_rect.right_edge.type()),
-            Length(interpolate_raw(from_rect.bottom_edge.raw_value(), to_rect.bottom_edge.raw_value()), from_rect.bottom_edge.type()),
-            Length(interpolate_raw(from_rect.left_edge.raw_value(), to_rect.left_edge.raw_value()), from_rect.left_edge.type()),
+            Length(interpolate_raw(from_rect.top_edge.raw_value(), to_rect.top_edge.raw_value(), delta), from_rect.top_edge.type()),
+            Length(interpolate_raw(from_rect.right_edge.raw_value(), to_rect.right_edge.raw_value(), delta), from_rect.right_edge.type()),
+            Length(interpolate_raw(from_rect.bottom_edge.raw_value(), to_rect.bottom_edge.raw_value(), delta), from_rect.bottom_edge.type()),
+            Length(interpolate_raw(from_rect.left_edge.raw_value(), to_rect.left_edge.raw_value(), delta), from_rect.left_edge.type()),
         });
     }
-    case StyleValue::Type::Transformation: {
-        auto& from_transform = from.as_transformation();
-        auto& to_transform = to.as_transformation();
-        if (from_transform.transform_function() != to_transform.transform_function())
-            return from;
-
-        auto from_input_values = from_transform.values();
-        auto to_input_values = to_transform.values();
-        if (from_input_values.size() != to_input_values.size())
-            return from;
-
-        StyleValueVector interpolated_values;
-        interpolated_values.ensure_capacity(from_input_values.size());
-        for (size_t i = 0; i < from_input_values.size(); ++i)
-            interpolated_values.append(TRY(interpolate_property(*from_input_values[i], *to_input_values[i], delta)));
-
-        return TransformationStyleValue::create(from_transform.transform_function(), move(interpolated_values));
-    }
+    case StyleValue::Type::Transformation:
+        VERIFY_NOT_REACHED();
     case StyleValue::Type::ValueList: {
         auto& from_list = from.as_value_list();
         auto& to_list = to.as_value_list();
@@ -869,7 +1370,7 @@ static ErrorOr<NonnullRefPtr<StyleValue>> interpolate_property(StyleValue const&
         StyleValueVector interpolated_values;
         interpolated_values.ensure_capacity(from_list.size());
         for (size_t i = 0; i < from_list.size(); ++i)
-            interpolated_values.append(TRY(interpolate_property(from_list.values()[i], to_list.values()[i], delta)));
+            interpolated_values.append(interpolate_value(element, from_list.values()[i], to_list.values()[i], delta));
 
         return StyleValueList::create(move(interpolated_values), from_list.separator());
     }
@@ -878,32 +1379,56 @@ static ErrorOr<NonnullRefPtr<StyleValue>> interpolate_property(StyleValue const&
     }
 }
 
-bool StyleComputer::Animation::is_animating_backwards() const
+static ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& element, PropertyID property_id, StyleValue const& from, StyleValue const& to, float delta)
 {
-    return (direction == CSS::AnimationDirection::AlternateReverse && current_iteration % 2 == 1)
-        || (direction == CSS::AnimationDirection::Alternate && current_iteration % 2 == 0)
-        || direction == CSS::AnimationDirection::Reverse;
+    auto animation_type = animation_type_from_longhand_property(property_id);
+    switch (animation_type) {
+    case AnimationType::ByComputedValue:
+        return interpolate_value(element, from, to, delta);
+    case AnimationType::None:
+        return to;
+    case AnimationType::Custom: {
+        if (property_id == PropertyID::Transform) {
+            if (auto interpolated_transform = interpolate_transform(element, from, to, delta))
+                return *interpolated_transform;
+
+            // https://drafts.csswg.org/css-transforms-1/#interpolation-of-transforms
+            // In some cases, an animation might cause a transformation matrix to be singular or non-invertible.
+            // For example, an animation in which scale moves from 1 to -1. At the time when the matrix is in
+            // such a state, the transformed element is not rendered.
+            return {};
+        }
+        if (property_id == PropertyID::BoxShadow)
+            return interpolate_box_shadow(element, from, to, delta);
+
+        // FIXME: Handle all custom animatable properties
+        [[fallthrough]];
+    }
+    // FIXME: Handle repeatable-list animatable properties
+    case AnimationType::RepeatableList:
+    case AnimationType::Discrete:
+    default:
+        return delta >= 0.5f ? to : from;
+    }
 }
 
-ErrorOr<void> StyleComputer::Animation::collect_into(StyleProperties& style_properties, RuleCache const& rule_cache) const
+void StyleComputer::collect_animation_into(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, JS::NonnullGCPtr<Animations::KeyframeEffect> effect, StyleProperties& style_properties, AnimationRefresh refresh) const
 {
-    if (remaining_delay.to_milliseconds() != 0) {
-        // If the fill mode is backwards or both, we'll pretend that the animation is started, but stuck at progress 0
-        if (fill_mode != CSS::AnimationFillMode::Backwards && fill_mode != CSS::AnimationFillMode::Both)
-            return {};
-    }
+    auto animation = effect->associated_animation();
+    if (!animation)
+        return;
 
-    auto matching_keyframes = rule_cache.rules_by_animation_keyframes.get(name);
-    if (!matching_keyframes.has_value())
-        return {};
+    auto output_progress = effect->transformed_progress();
+    if (!output_progress.has_value())
+        return;
 
-    auto& keyframes = matching_keyframes.value()->keyframes_by_key;
+    if (!effect->key_frame_set())
+        return;
 
-    auto output_progress = compute_output_progress(progress.as_fraction()) * 100.f;
-    auto is_backwards = is_animating_backwards();
+    auto& keyframes = effect->key_frame_set()->keyframes_by_key;
 
-    auto key = static_cast<u64>(output_progress * AnimationKeyFrameKeyScaleFactor);
-    auto matching_keyframe_it = is_backwards ? keyframes.find_smallest_not_below_iterator(key) : keyframes.find_largest_not_above_iterator(key);
+    auto key = static_cast<u64>(output_progress.value() * 100.0 * Animations::KeyframeEffect::AnimationKeyFrameKeyScaleFactor);
+    auto matching_keyframe_it = keyframes.find_largest_not_above_iterator(key);
     if (matching_keyframe_it.is_end()) {
         if constexpr (LIBWEB_CSS_ANIMATION_DEBUG) {
             dbgln("    Did not find any start keyframe for the current state ({}) :(", key);
@@ -911,14 +1436,14 @@ ErrorOr<void> StyleComputer::Animation::collect_into(StyleProperties& style_prop
             for (auto it = keyframes.begin(); it != keyframes.end(); ++it)
                 dbgln("        - {}", it.key());
         }
-        return {};
+        return;
     }
 
     auto keyframe_start = matching_keyframe_it.key();
     auto keyframe_values = *matching_keyframe_it;
 
     auto initial_keyframe_it = matching_keyframe_it;
-    auto keyframe_end_it = is_backwards ? --matching_keyframe_it : ++matching_keyframe_it;
+    auto keyframe_end_it = ++matching_keyframe_it;
     if (keyframe_end_it.is_end())
         keyframe_end_it = initial_keyframe_it;
 
@@ -927,59 +1452,45 @@ ErrorOr<void> StyleComputer::Animation::collect_into(StyleProperties& style_prop
 
     auto progress_in_keyframe = [&] {
         if (keyframe_start == keyframe_end)
-            return is_backwards ? 1.f : 0.f;
-
-        return is_backwards
-            ? static_cast<float>(keyframe_start - key) / static_cast<float>(keyframe_start - keyframe_end)
-            : static_cast<float>(key - keyframe_start) / static_cast<float>(keyframe_end - keyframe_start);
+            return 0.f;
+        return static_cast<float>(key - keyframe_start) / static_cast<float>(keyframe_end - keyframe_start);
     }();
 
-    auto valid_properties = 0;
-    for (auto const& property : keyframe_values.resolved_properties) {
-        if (property.has<Empty>())
-            continue;
-        valid_properties++;
+    if constexpr (LIBWEB_CSS_ANIMATION_DEBUG) {
+        auto valid_properties = keyframe_values.properties.size();
+        dbgln("Animation {} contains {} properties to interpolate, progress = {}%", animation->id(), valid_properties, progress_in_keyframe * 100);
     }
 
-    dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "Animation {} contains {} properties to interpolate, progress = {}%", name, valid_properties, progress_in_keyframe * 100);
-
-    if (fill_mode == CSS::AnimationFillMode::Forwards || fill_mode == CSS::AnimationFillMode::Both) {
-        if (!active_state_if_fill_forward)
-            active_state_if_fill_forward = make<AnimationStateSnapshot>();
-    }
-
-    UnderlyingType<PropertyID> property_id_value = 0;
-    for (auto const& property : keyframe_values.resolved_properties) {
-        auto property_id = static_cast<PropertyID>(property_id_value++);
-        if (property.has<Empty>())
-            continue;
-
+    for (auto const& it : keyframe_values.properties) {
         auto resolve_property = [&](auto& property) {
             return property.visit(
-                [](Empty) -> RefPtr<StyleValue const> { VERIFY_NOT_REACHED(); },
-                [&](AnimationKeyFrameSet::ResolvedKeyFrame::UseInitial) {
-                    if (auto value = initial_state.state[to_underlying(property_id)])
-                        return value;
-
-                    auto value = style_properties.maybe_null_property(property_id);
-                    initial_state.state[to_underlying(property_id)] = value;
-                    return value;
+                [&](Animations::KeyframeEffect::KeyFrameSet::UseInitial) -> RefPtr<StyleValue const> {
+                    if (refresh == AnimationRefresh::Yes)
+                        return {};
+                    return style_properties.maybe_null_property(it.key);
                 },
-                [&](RefPtr<StyleValue const> value) { return value; });
+                [&](RefPtr<StyleValue const> value) -> RefPtr<StyleValue const> {
+                    if (value->is_unresolved())
+                        return Parser::Parser::resolve_unresolved_style_value(Parser::ParsingContext { element.document() }, element, pseudo_element, it.key, value->as_unresolved());
+                    return value;
+                });
         };
 
-        auto resolved_start_property = resolve_property(property);
+        auto resolved_start_property = resolve_property(it.value);
 
-        auto const& end_property = keyframe_end_values.resolved_properties[to_underlying(property_id)];
-        if (end_property.has<Empty>()) {
+        auto const& end_property = keyframe_end_values.properties.get(it.key);
+        if (!end_property.has_value()) {
             if (resolved_start_property) {
-                style_properties.set_property(property_id, resolved_start_property.release_nonnull());
-                dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "No end property for property {}, using {}", string_from_property_id(property_id), resolved_start_property->to_string());
+                style_properties.set_animated_property(it.key, *resolved_start_property);
+                dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "No end property for property {}, using {}", string_from_property_id(it.key), resolved_start_property->to_string());
             }
             continue;
         }
 
-        auto resolved_end_property = resolve_property(end_property);
+        auto resolved_end_property = resolve_property(end_property.value());
+
+        if (resolved_end_property && !resolved_start_property)
+            resolved_start_property = CSS::property_initial_value(document().realm(), it.key);
 
         if (!resolved_start_property || !resolved_end_property)
             continue;
@@ -987,230 +1498,107 @@ ErrorOr<void> StyleComputer::Animation::collect_into(StyleProperties& style_prop
         auto start = resolved_start_property.release_nonnull();
         auto end = resolved_end_property.release_nonnull();
 
-        auto next_value = TRY(interpolate_property(*start, *end, progress_in_keyframe));
-        dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "Interpolated value for property {} at {}: {} -> {} = {}", string_from_property_id(property_id), progress_in_keyframe, start->to_string(), end->to_string(), next_value->to_string());
-        style_properties.set_property(property_id, next_value);
-        if (active_state_if_fill_forward)
-            active_state_if_fill_forward->state[to_underlying(property_id)] = next_value;
-    }
-
-    return {};
-}
-
-bool StyleComputer::Animation::is_done() const
-{
-    return progress.as_fraction() >= 0.9999 && iteration_count.has_value() && iteration_count.value() == 0;
-}
-
-// NOTE: Magic values from <https://www.w3.org/TR/css-easing-1/#valdef-cubic-bezier-easing-function-ease>
-static auto ease_timing_function = StyleComputer::AnimationTiming::CubicBezier { 0.25, 0.1, 0.25, 1.0 };
-static auto ease_in_timing_function = StyleComputer::AnimationTiming::CubicBezier { 0.42, 0.0, 1.0, 1.0 };
-static auto ease_out_timing_function = StyleComputer::AnimationTiming::CubicBezier { 0.0, 0.0, 0.58, 1.0 };
-static auto ease_in_out_timing_function = StyleComputer::AnimationTiming::CubicBezier { 0.42, 0.0, 0.58, 1.0 };
-
-float StyleComputer::Animation::compute_output_progress(float input_progress) const
-{
-    auto output_progress = input_progress;
-    auto going_forwards = true;
-    switch (direction) {
-    case AnimationDirection::Alternate:
-        if (current_iteration % 2 == 0) {
-            output_progress = 1.0f - output_progress;
-            going_forwards = false;
-        }
-        break;
-    case AnimationDirection::AlternateReverse:
-        if (current_iteration % 2 == 1) {
-            output_progress = 1.0f - output_progress;
-            going_forwards = false;
-        }
-        break;
-    case AnimationDirection::Normal:
-        break;
-    case AnimationDirection::Reverse:
-        output_progress = 1.0f - output_progress;
-        going_forwards = false;
-        break;
-    }
-
-    if (remaining_delay.to_milliseconds() != 0)
-        return output_progress;
-
-    return timing_function.timing_function.visit(
-        [&](AnimationTiming::Linear) { return output_progress; },
-        [&](AnimationTiming::Steps const& steps) {
-            auto before_flag = (current_state == AnimationState::Before && going_forwards) || (current_state == AnimationState::After && !going_forwards);
-            auto progress_step = output_progress * static_cast<float>(steps.number_of_steps);
-            auto current_step = floorf(progress_step);
-            if (steps.jump_at_start)
-                current_step += 1;
-            if (before_flag && truncf(progress_step) == progress_step)
-                current_step -= 1;
-            if (output_progress >= 0 && current_step < 0)
-                current_step = 0;
-            size_t jumps;
-            if (steps.jump_at_start ^ steps.jump_at_end)
-                jumps = steps.number_of_steps;
-            else if (steps.jump_at_start && steps.jump_at_end)
-                jumps = steps.number_of_steps + 1;
-            else
-                jumps = steps.number_of_steps - 1;
-
-            if (output_progress <= 1 && current_step > static_cast<float>(jumps))
-                current_step = static_cast<float>(jumps);
-            return current_step / static_cast<float>(steps.number_of_steps);
-        },
-        [&](AnimationTiming::CubicBezier const& bezier) {
-            // Special cases first:
-            if (bezier == AnimationTiming::CubicBezier { 0.0, 0.0, 1.0, 1.0 })
-                return output_progress;
-            // FIXME: This is quite inefficient on memory and CPU, find a better way to do this.
-            auto sample = bezier.sample_around(static_cast<double>(output_progress));
-            return static_cast<float>(sample.y);
-        });
-}
-
-static double cubic_bezier_at(double x1, double x2, double t)
-{
-    auto a = 1.0 - 3.0 * x2 + 3.0 * x1;
-    auto b = 3.0 * x2 - 6.0 * x1;
-    auto c = 3.0 * x1;
-
-    auto t2 = t * t;
-    auto t3 = t2 * t;
-
-    return (a * t3) + (b * t2) + (c * t);
-}
-
-StyleComputer::AnimationTiming::CubicBezier::CachedSample StyleComputer::AnimationTiming::CubicBezier::sample_around(double x) const
-{
-    x = clamp(x, 0, 1);
-
-    auto solve = [&](auto t) {
-        auto x = cubic_bezier_at(x1, x2, t);
-        auto y = cubic_bezier_at(y1, y2, t);
-        return CachedSample { x, y, t };
-    };
-
-    if (m_cached_x_samples.is_empty())
-        m_cached_x_samples.append(solve(0.));
-
-    size_t nearby_index = 0;
-    if (auto found = binary_search(m_cached_x_samples, x, &nearby_index, [](auto x, auto& sample) {
-            if (x > sample.x)
-                return 1;
-            if (x < sample.x)
-                return -1;
-            return 0;
-        }))
-        return *found;
-
-    if (nearby_index == m_cached_x_samples.size() || nearby_index + 1 == m_cached_x_samples.size()) {
-        // Produce more samples until we have enough.
-        auto last_t = m_cached_x_samples.is_empty() ? 0 : m_cached_x_samples.last().t;
-        auto last_x = m_cached_x_samples.is_empty() ? 0 : m_cached_x_samples.last().x;
-        while (last_x <= x) {
-            last_t += 1. / 60.;
-            auto solution = solve(last_t);
-            m_cached_x_samples.append(solution);
-            last_x = solution.x;
+        if (style_properties.is_property_important(it.key)) {
+            continue;
         }
 
-        if (auto found = binary_search(m_cached_x_samples, x, &nearby_index, [](auto x, auto& sample) {
-                if (x > sample.x)
-                    return 1;
-                if (x < sample.x)
-                    return -1;
-                return 0;
-            }))
-            return *found;
+        if (auto next_value = interpolate_property(*effect->target(), it.key, *start, *end, progress_in_keyframe)) {
+            dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "Interpolated value for property {} at {}: {} -> {} = {}", string_from_property_id(it.key), progress_in_keyframe, start->to_string(), end->to_string(), next_value->to_string());
+            style_properties.set_animated_property(it.key, *next_value);
+        } else {
+            // If interpolate_property() fails, the element should not be rendered
+            dbgln_if(LIBWEB_CSS_ANIMATION_DEBUG, "Interpolated value for property {} at {}: {} -> {} is invalid", string_from_property_id(it.key), progress_in_keyframe, start->to_string(), end->to_string());
+            style_properties.set_animated_property(PropertyID::Visibility, IdentifierStyleValue::create(ValueID::Hidden));
+        }
     }
-
-    // We have two samples on either side of the x value we want, so we can linearly interpolate between them.
-    auto& sample1 = m_cached_x_samples[nearby_index];
-    auto& sample2 = m_cached_x_samples[nearby_index + 1];
-    auto factor = (x - sample1.x) / (sample2.x - sample1.x);
-    return CachedSample {
-        x,
-        clamp(sample1.y + factor * (sample2.y - sample1.y), 0, 1),
-        sample1.t + factor * (sample2.t - sample1.t),
-    };
 }
 
-void StyleComputer::ensure_animation_timer() const
+static void apply_animation_properties(DOM::Document& document, StyleProperties& style, Animations::Animation& animation)
 {
-    constexpr static auto timer_delay_ms = 1000 / 60;
-    if (!m_animation_driver_timer) {
-        m_animation_driver_timer = Platform::Timer::create_repeating(timer_delay_ms, [this] {
-            // If we run out of animations, stop the timer - it'll turn back on the next time we have an active animation.
-            if (m_active_animations.is_empty()) {
-                m_animation_driver_timer->stop();
-                return;
-            }
+    auto& effect = verify_cast<Animations::KeyframeEffect>(*animation.effect());
 
-            HashTable<AnimationKey> animations_to_remove;
-            HashTable<DOM::Element*> owning_elements_to_invalidate;
-
-            for (auto& it : m_active_animations) {
-                if (!it.value->owning_element) {
-                    // The element disappeared since we last ran, just discard the animation.
-                    animations_to_remove.set(it.key);
-                    continue;
-                }
-
-                auto transition = it.value->step(CSS::Time { timer_delay_ms, CSS::Time::Type::Ms });
-                owning_elements_to_invalidate.set(it.value->owning_element);
-
-                switch (transition) {
-                case AnimationStepTransition::NoTransition:
-                    break;
-                case AnimationStepTransition::IdleOrBeforeToActive:
-                    // FIXME: Dispatch `animationstart`.
-                    break;
-                case AnimationStepTransition::IdleOrBeforeToAfter:
-                    // FIXME: Dispatch `animationstart` then `animationend`.
-                    m_finished_animations.set(it.key, move(it.value->active_state_if_fill_forward));
-                    break;
-                case AnimationStepTransition::ActiveToBefore:
-                    // FIXME: Dispatch `animationend`.
-                    m_finished_animations.set(it.key, move(it.value->active_state_if_fill_forward));
-                    break;
-                case AnimationStepTransition::ActiveToActiveChangingTheIteration:
-                    // FIXME: Dispatch `animationiteration`.
-                    break;
-                case AnimationStepTransition::ActiveToAfter:
-                    // FIXME: Dispatch `animationend`.
-                    m_finished_animations.set(it.key, move(it.value->active_state_if_fill_forward));
-                    break;
-                case AnimationStepTransition::AfterToActive:
-                    // FIXME: Dispatch `animationstart`.
-                    break;
-                case AnimationStepTransition::AfterToBefore:
-                    // FIXME: Dispatch `animationstart` then `animationend`.
-                    m_finished_animations.set(it.key, move(it.value->active_state_if_fill_forward));
-                    break;
-                case AnimationStepTransition::Cancelled:
-                    // FIXME: Dispatch `animationcancel`.
-                    m_finished_animations.set(it.key, nullptr);
-                    break;
-                }
-                if (it.value->is_done())
-                    animations_to_remove.set(it.key);
-            }
-
-            for (auto key : animations_to_remove)
-                m_active_animations.remove(key);
-
-            for (auto* element : owning_elements_to_invalidate)
-                element->set_needs_style_update(true);
-        });
+    Optional<CSS::Time> duration;
+    if (auto duration_value = style.maybe_null_property(PropertyID::AnimationDuration); duration_value) {
+        if (duration_value->is_time()) {
+            duration = duration_value->as_time().time();
+        } else if (duration_value->is_identifier() && duration_value->as_identifier().id() == ValueID::Auto) {
+            // We use empty optional to represent "auto".
+            duration = {};
+        }
     }
 
-    m_animation_driver_timer->start();
+    CSS::Time delay { 0, CSS::Time::Type::S };
+    if (auto delay_value = style.maybe_null_property(PropertyID::AnimationDelay); delay_value && delay_value->is_time())
+        delay = delay_value->as_time().time();
+
+    double iteration_count = 1.0;
+    if (auto iteration_count_value = style.maybe_null_property(PropertyID::AnimationIterationCount); iteration_count_value) {
+        if (iteration_count_value->is_identifier() && iteration_count_value->to_identifier() == ValueID::Infinite)
+            iteration_count = HUGE_VAL;
+        else if (iteration_count_value->is_number())
+            iteration_count = iteration_count_value->as_number().number();
+    }
+
+    CSS::AnimationFillMode fill_mode { CSS::AnimationFillMode::None };
+    if (auto fill_mode_property = style.maybe_null_property(PropertyID::AnimationFillMode); fill_mode_property && fill_mode_property->is_identifier()) {
+        if (auto fill_mode_value = value_id_to_animation_fill_mode(fill_mode_property->to_identifier()); fill_mode_value.has_value())
+            fill_mode = *fill_mode_value;
+    }
+
+    CSS::AnimationDirection direction { CSS::AnimationDirection::Normal };
+    if (auto direction_property = style.maybe_null_property(PropertyID::AnimationDirection); direction_property && direction_property->is_identifier()) {
+        if (auto direction_value = value_id_to_animation_direction(direction_property->to_identifier()); direction_value.has_value())
+            direction = *direction_value;
+    }
+
+    CSS::AnimationPlayState play_state { CSS::AnimationPlayState::Running };
+    if (auto play_state_property = style.maybe_null_property(PropertyID::AnimationPlayState); play_state_property && play_state_property->is_identifier()) {
+        if (auto play_state_value = value_id_to_animation_play_state(play_state_property->to_identifier()); play_state_value.has_value())
+            play_state = *play_state_value;
+    }
+
+    Animations::TimingFunction timing_function = Animations::ease_timing_function;
+    if (auto timing_property = style.maybe_null_property(PropertyID::AnimationTimingFunction); timing_property && timing_property->is_easing())
+        timing_function = Animations::TimingFunction::from_easing_style_value(timing_property->as_easing());
+
+    auto iteration_duration = duration.has_value()
+        ? Variant<double, String> { duration.release_value().to_milliseconds() }
+        : "auto"_string;
+    effect.set_iteration_duration(iteration_duration);
+    effect.set_start_delay(delay.to_milliseconds());
+    effect.set_iteration_count(iteration_count);
+    effect.set_timing_function(move(timing_function));
+    effect.set_fill_mode(Animations::css_fill_mode_to_bindings_fill_mode(fill_mode));
+    effect.set_playback_direction(Animations::css_animation_direction_to_bindings_playback_direction(direction));
+
+    if (play_state != effect.last_css_animation_play_state()) {
+        if (play_state == CSS::AnimationPlayState::Running && animation.play_state() == Bindings::AnimationPlayState::Paused) {
+            HTML::TemporaryExecutionContext context(document.relevant_settings_object());
+            animation.play().release_value_but_fixme_should_propagate_errors();
+        } else if (play_state == CSS::AnimationPlayState::Paused && animation.play_state() != Bindings::AnimationPlayState::Paused) {
+            HTML::TemporaryExecutionContext context(document.relevant_settings_object());
+            animation.pause().release_value_but_fixme_should_propagate_errors();
+        }
+
+        effect.set_last_css_animation_play_state(play_state);
+    }
+}
+
+static void apply_dimension_attribute(StyleProperties& style, DOM::Element const& element, FlyString const& attribute_name, CSS::PropertyID property_id)
+{
+    auto attribute = element.attribute(attribute_name);
+    if (!attribute.has_value())
+        return;
+
+    auto parsed_value = HTML::parse_dimension_value(*attribute);
+    if (!parsed_value)
+        return;
+
+    style.set_property(property_id, parsed_value.release_nonnull());
 }
 
 // https://www.w3.org/TR/css-cascade/#cascading
-ErrorOr<void> StyleComputer::compute_cascaded_values(StyleProperties& style, DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, bool& did_match_any_pseudo_element_rules, ComputeStyleMode mode) const
+void StyleComputer::compute_cascaded_values(StyleProperties& style, DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, bool& did_match_any_pseudo_element_rules, ComputeStyleMode mode) const
 {
     // First, we collect all the CSS rules whose selectors match `element`:
     MatchingRuleSet matching_rule_set;
@@ -1225,13 +1613,13 @@ ErrorOr<void> StyleComputer::compute_cascaded_values(StyleProperties& style, DOM
         VERIFY(pseudo_element.has_value());
         if (matching_rule_set.author_rules.is_empty() && matching_rule_set.user_rules.is_empty() && matching_rule_set.user_agent_rules.is_empty()) {
             did_match_any_pseudo_element_rules = false;
-            return {};
+            return;
         }
         did_match_any_pseudo_element_rules = true;
     }
 
-    // Then we resolve all the CSS custom pr`operties ("variables") for this element:
-    TRY(cascade_custom_properties(element, pseudo_element, matching_rule_set.author_rules));
+    // Then we resolve all the CSS custom properties ("variables") for this element:
+    cascade_custom_properties(element, pseudo_element, matching_rule_set.author_rules);
 
     // Then we apply the declarations from the matched rules in cascade order:
 
@@ -1245,14 +1633,19 @@ ErrorOr<void> StyleComputer::compute_cascaded_values(StyleProperties& style, DOM
     if (!pseudo_element.has_value()) {
         element.apply_presentational_hints(style);
 
+        if (element.supports_dimension_attributes()) {
+            apply_dimension_attribute(style, element, HTML::AttributeNames::width, CSS::PropertyID::Width);
+            apply_dimension_attribute(style, element, HTML::AttributeNames::height, CSS::PropertyID::Height);
+        }
+
         // SVG presentation attributes are parsed as CSS values, so we need to handle potential custom properties here.
         if (element.is_svg_element()) {
             // FIXME: This is not very efficient, we should only resolve the custom properties that are actually used.
             for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
                 auto property_id = (CSS::PropertyID)i;
                 auto& property = style.m_property_values[i];
-                if (property.has_value() && property->style->is_unresolved())
-                    property->style = Parser::Parser::resolve_unresolved_style_value({}, Parser::ParsingContext { document() }, element, pseudo_element, property_id, property->style->as_unresolved());
+                if (property.style && property.style->is_unresolved())
+                    property.style = Parser::Parser::resolve_unresolved_style_value(Parser::ParsingContext { document() }, element, pseudo_element, property_id, property.style->as_unresolved());
             }
         }
     }
@@ -1261,176 +1654,65 @@ ErrorOr<void> StyleComputer::compute_cascaded_values(StyleProperties& style, DOM
     cascade_declarations(style, element, pseudo_element, matching_rule_set.author_rules, CascadeOrigin::Author, Important::No);
 
     // Animation declarations [css-animations-2]
-    auto get_animation_name = [&]() -> Optional<String> {
+    auto animation_name = [&]() -> Optional<String> {
         auto animation_name = style.maybe_null_property(PropertyID::AnimationName);
         if (animation_name.is_null())
             return OptionalNone {};
         if (animation_name->is_string())
             return animation_name->as_string().string_value();
         return animation_name->to_string();
-    };
-    if (auto animation_name = get_animation_name(); animation_name.has_value()) {
-        if (auto source_declaration = style.property_source_declaration(PropertyID::AnimationName)) {
-            AnimationKey animation_key {
-                .source_declaration = source_declaration,
-                .element = &element,
-            };
+    }();
 
-            if (auto finished_state = m_finished_animations.get(animation_key); finished_state.has_value()) {
-                // We've already finished going through this animation, so drop it from the active animations.
-                m_active_animations.remove(animation_key);
-                // If the animation's fill mode was set to forwards/both, we need to collect and use the final frame's styles.
-                if (*finished_state) {
-                    auto& state = (*finished_state)->state;
-                    for (size_t property_id_value = 0; property_id_value < state.size(); ++property_id_value) {
-                        if (auto& property_value = state[property_id_value])
-                            style.set_property(static_cast<PropertyID>(property_id_value), *property_value);
-                    }
-                }
-            } else if (!animation_name->is_empty()) {
-                auto active_animation = m_active_animations.get(animation_key);
-                if (!active_animation.has_value()) {
-                    // New animation!
-                    Optional<CSS::Time> duration;
-                    if (auto duration_value = style.maybe_null_property(PropertyID::AnimationDuration); duration_value) {
-                        if (duration_value->is_time()) {
-                            duration = duration_value->as_time().time();
-                        } else if (duration_value->is_identifier() && duration_value->as_identifier().id() == ValueID::Auto) {
-                            // We use empty optional to represent "auto".
-                            duration = {};
-                        }
-                    }
+    if (animation_name.has_value()) {
+        if (auto source_declaration = style.property_source_declaration(PropertyID::AnimationName); source_declaration) {
+            auto& realm = element.realm();
 
-                    CSS::Time delay { 0, CSS::Time::Type::S };
-                    if (auto delay_value = style.maybe_null_property(PropertyID::AnimationDelay); delay_value && delay_value->is_time())
-                        delay = delay_value->as_time().time();
+            if (source_declaration != element.cached_animation_name_source()) {
+                // This animation name is new, so we need to create a new animation for it.
+                if (auto existing_animation = element.cached_animation_name_animation())
+                    existing_animation->cancel(Animations::Animation::ShouldInvalidate::No);
+                element.set_cached_animation_name_source(source_declaration);
 
-                    Optional<size_t> iteration_count = 1;
-                    if (auto iteration_count_value = style.maybe_null_property(PropertyID::AnimationIterationCount); iteration_count_value) {
-                        if (iteration_count_value->is_identifier() && iteration_count_value->to_identifier() == ValueID::Infinite)
-                            iteration_count = {};
-                        else if (iteration_count_value->is_number())
-                            iteration_count = static_cast<size_t>(iteration_count_value->as_number().number());
-                    }
+                auto effect = Animations::KeyframeEffect::create(realm);
+                auto animation = CSSAnimation::create(realm);
+                animation->set_id(animation_name.release_value());
+                animation->set_timeline(m_document->timeline());
+                animation->set_owning_element(element);
+                animation->set_effect(effect);
+                apply_animation_properties(m_document, style, animation);
+                if (pseudo_element.has_value())
+                    effect->set_pseudo_element(Selector::PseudoElement { pseudo_element.value() });
 
-                    CSS::AnimationFillMode fill_mode { CSS::AnimationFillMode::None };
-                    if (auto fill_mode_property = style.maybe_null_property(PropertyID::AnimationFillMode); fill_mode_property && fill_mode_property->is_identifier()) {
-                        if (auto fill_mode_value = value_id_to_animation_fill_mode(fill_mode_property->to_identifier()); fill_mode_value.has_value())
-                            fill_mode = *fill_mode_value;
-                    }
+                auto const& rule_cache = rule_cache_for_cascade_origin(CascadeOrigin::Author);
+                if (auto keyframe_set = rule_cache.rules_by_animation_keyframes.get(animation->id()); keyframe_set.has_value())
+                    effect->set_key_frame_set(keyframe_set.value());
 
-                    CSS::AnimationDirection direction { CSS::AnimationDirection::Normal };
-                    if (auto direction_property = style.maybe_null_property(PropertyID::AnimationDirection); direction_property && direction_property->is_identifier()) {
-                        if (auto direction_value = value_id_to_animation_direction(direction_property->to_identifier()); direction_value.has_value())
-                            direction = *direction_value;
-                    }
+                effect->set_target(&element);
+                element.set_cached_animation_name_animation(animation);
 
-                    AnimationTiming timing_function { ease_timing_function };
-                    if (auto timing_property = style.maybe_null_property(PropertyID::AnimationTimingFunction); timing_property && timing_property->is_easing()) {
-                        auto& easing_value = timing_property->as_easing();
-                        switch (easing_value.easing_function()) {
-                        case EasingFunction::Linear:
-                            timing_function = AnimationTiming { AnimationTiming::Linear {} };
-                            break;
-                        case EasingFunction::Ease:
-                            timing_function = AnimationTiming { ease_timing_function };
-                            break;
-                        case EasingFunction::EaseIn:
-                            timing_function = AnimationTiming { ease_in_timing_function };
-                            break;
-                        case EasingFunction::EaseOut:
-                            timing_function = AnimationTiming { ease_out_timing_function };
-                            break;
-                        case EasingFunction::EaseInOut:
-                            timing_function = AnimationTiming { ease_in_out_timing_function };
-                            break;
-                        case EasingFunction::CubicBezier: {
-                            auto values = easing_value.values();
-                            timing_function = AnimationTiming {
-                                AnimationTiming::CubicBezier {
-                                    values[0]->as_number().number(),
-                                    values[1]->as_number().number(),
-                                    values[2]->as_number().number(),
-                                    values[3]->as_number().number(),
-                                },
-                            };
-                            break;
-                        }
-                        case EasingFunction::Steps: {
-                            auto values = easing_value.values();
-                            auto jump_at_start = false;
-                            auto jump_at_end = true;
-
-                            if (values.size() > 1) {
-                                auto identifier = values[1]->to_identifier();
-                                switch (identifier) {
-                                case ValueID::JumpStart:
-                                case ValueID::Start:
-                                    jump_at_start = true;
-                                    jump_at_end = false;
-                                    break;
-                                case ValueID::JumpEnd:
-                                case ValueID::End:
-                                    jump_at_start = false;
-                                    jump_at_end = true;
-                                    break;
-                                case ValueID::JumpNone:
-                                    jump_at_start = false;
-                                    jump_at_end = false;
-                                    break;
-                                default:
-                                    break;
-                                }
-                            }
-
-                            timing_function = AnimationTiming { AnimationTiming::Steps {
-                                .number_of_steps = static_cast<size_t>(max(values[0]->as_integer().integer(), !(jump_at_end && jump_at_start) ? 1 : 0)),
-                                .jump_at_start = jump_at_start,
-                                .jump_at_end = jump_at_end,
-                            } };
-                            break;
-                        }
-                        case EasingFunction::StepEnd:
-                            timing_function = AnimationTiming { AnimationTiming::Steps {
-                                .number_of_steps = 1,
-                                .jump_at_start = false,
-                                .jump_at_end = true,
-                            } };
-                            break;
-                        case EasingFunction::StepStart:
-                            timing_function = AnimationTiming { AnimationTiming::Steps {
-                                .number_of_steps = 1,
-                                .jump_at_start = true,
-                                .jump_at_end = false,
-                            } };
-                            break;
-                        }
-                    }
-
-                    auto animation = make<Animation>(Animation {
-                        .name = animation_name.release_value(),
-                        .duration = duration,
-                        .delay = delay,
-                        .iteration_count = iteration_count,
-                        .timing_function = timing_function,
-                        .direction = direction,
-                        .fill_mode = fill_mode,
-                        .owning_element = TRY(element.try_make_weak_ptr<DOM::Element>()),
-                        .progress = CSS::Percentage(0),
-                        .remaining_delay = delay,
-                    });
-                    active_animation = animation;
-                    m_active_animations.set(animation_key, move(animation));
-                }
-
-                TRY((*active_animation)->collect_into(style, rule_cache_for_cascade_origin(CascadeOrigin::Author)));
+                HTML::TemporaryExecutionContext context(m_document->relevant_settings_object());
+                animation->play().release_value_but_fixme_should_propagate_errors();
             } else {
-                m_active_animations.remove(animation_key);
+                // The animation hasn't changed, but some properties of the animation may have
+                apply_animation_properties(m_document, style, *element.cached_animation_name_animation());
             }
         }
+    } else {
+        // If the element had an existing animation, cancel it
+        if (auto existing_animation = element.cached_animation_name_animation()) {
+            existing_animation->cancel(Animations::Animation::ShouldInvalidate::No);
+            element.set_cached_animation_name_animation({});
+            element.set_cached_animation_name_source({});
+        }
+    }
 
-        if (!m_active_animations.is_empty())
-            ensure_animation_timer();
+    auto animations = element.get_animations({ .subtree = false });
+    for (auto& animation : animations) {
+        if (auto effect = animation->effect(); effect && effect->is_keyframe_effect()) {
+            auto& keyframe_effect = *static_cast<Animations::KeyframeEffect*>(effect.ptr());
+            if (keyframe_effect.pseudo_element_type() == pseudo_element)
+                collect_animation_into(element, pseudo_element, keyframe_effect, style);
+        }
     }
 
     // Important author declarations
@@ -1443,8 +1725,6 @@ ErrorOr<void> StyleComputer::compute_cascaded_values(StyleProperties& style, DOM
     cascade_declarations(style, element, pseudo_element, matching_rule_set.user_agent_rules, CascadeOrigin::UserAgent, Important::Yes);
 
     // FIXME: Transition declarations [css-transitions-1]
-
-    return {};
 }
 
 DOM::Element const* element_to_inherit_style_from(DOM::Element const* element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element)
@@ -1459,7 +1739,7 @@ DOM::Element const* element_to_inherit_style_from(DOM::Element const* element, O
     return parent_element;
 }
 
-NonnullRefPtr<StyleValue const> get_inherit_value(JS::Realm& initial_value_context_realm, CSS::PropertyID property_id, DOM::Element const* element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element)
+NonnullRefPtr<StyleValue const> StyleComputer::get_inherit_value(JS::Realm& initial_value_context_realm, CSS::PropertyID property_id, DOM::Element const* element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element)
 {
     auto* parent_element = element_to_inherit_style_from(element, pseudo_element);
 
@@ -1473,33 +1753,35 @@ void StyleComputer::compute_defaulted_property_value(StyleProperties& style, DOM
     // FIXME: If we don't know the correct initial value for a property, we fall back to InitialStyleValue.
 
     auto& value_slot = style.m_property_values[to_underlying(property_id)];
-    if (!value_slot.has_value()) {
+    if (!value_slot.style) {
         if (is_inherited_property(property_id))
-            style.m_property_values[to_underlying(property_id)] = { { get_inherit_value(document().realm(), property_id, element, pseudo_element), nullptr } };
+            style.m_property_values[to_underlying(property_id)] = { get_inherit_value(document().realm(), property_id, element, pseudo_element), nullptr, StyleProperties::Important::No, StyleProperties::Inherited::Yes };
         else
-            style.m_property_values[to_underlying(property_id)] = { { property_initial_value(document().realm(), property_id), nullptr } };
+            style.m_property_values[to_underlying(property_id)] = { property_initial_value(document().realm(), property_id), nullptr };
         return;
     }
 
-    if (value_slot->style->is_initial()) {
-        value_slot->style = property_initial_value(document().realm(), property_id);
+    if (value_slot.style->is_initial()) {
+        value_slot.style = property_initial_value(document().realm(), property_id);
         return;
     }
 
-    if (value_slot->style->is_inherit()) {
-        value_slot->style = get_inherit_value(document().realm(), property_id, element, pseudo_element);
+    if (value_slot.style->is_inherit()) {
+        value_slot.style = get_inherit_value(document().realm(), property_id, element, pseudo_element);
+        value_slot.inherited = StyleProperties::Inherited::Yes;
         return;
     }
 
     // https://www.w3.org/TR/css-cascade-4/#inherit-initial
     // If the cascaded value of a property is the unset keyword,
-    if (value_slot->style->is_unset()) {
+    if (value_slot.style->is_unset()) {
         if (is_inherited_property(property_id)) {
             // then if it is an inherited property, this is treated as inherit,
-            value_slot->style = get_inherit_value(document().realm(), property_id, element, pseudo_element);
+            value_slot.style = get_inherit_value(document().realm(), property_id, element, pseudo_element);
+            value_slot.inherited = StyleProperties::Inherited::Yes;
         } else {
             // and if it is not, this is treated as initial.
-            value_slot->style = property_initial_value(document().realm(), property_id);
+            value_slot.style = property_initial_value(document().realm(), property_id);
         }
     }
 }
@@ -1573,7 +1855,7 @@ RefPtr<Gfx::FontCascadeList const> StyleComputer::font_matching_algorithm(FontFa
         if (font_key_and_loader.key.family_name.equals_ignoring_ascii_case(key.family_name))
             matching_family_fonts.empend(font_key_and_loader.key, const_cast<FontLoaderList*>(&font_key_and_loader.value));
     }
-    Gfx::FontDatabase::the().for_each_typeface_with_family_name(key.family_name.to_string(), [&](Gfx::Typeface const& typeface) {
+    Gfx::FontDatabase::the().for_each_typeface_with_family_name(key.family_name, [&](Gfx::Typeface const& typeface) {
         matching_family_fonts.empend(
             FontFaceKey {
                 .family_name = typeface.family(),
@@ -1874,11 +2156,7 @@ RefPtr<Gfx::FontCascadeList const> StyleComputer::compute_font_for_style_values(
     }
 
     auto found_font = StyleProperties::font_fallback(monospace, bold);
-    if (auto scaled_fallback_font = found_font->with_size(font_size_in_pt)) {
-        font_list->add(*scaled_fallback_font);
-    } else {
-        font_list->add(*found_font);
-    }
+    font_list->add(found_font->with_size(font_size_in_pt));
 
     return font_list;
 }
@@ -1936,27 +2214,48 @@ void StyleComputer::absolutize_values(StyleProperties& style) const
     //       We have to resolve them right away, so that the *computed* line-height is ready for inheritance.
     //       We can't simply absolutize *all* percentage values against the font size,
     //       because most percentages are relative to containing block metrics.
-    auto line_height_value_slot = style.m_property_values[to_underlying(CSS::PropertyID::LineHeight)].map([](auto& x) -> auto& { return x.style; });
-    if (line_height_value_slot.has_value() && (*line_height_value_slot)->is_percentage()) {
-        *line_height_value_slot = LengthStyleValue::create(
-            Length::make_px(CSSPixels::nearest_value_for(font_size * static_cast<double>((*line_height_value_slot)->as_percentage().percentage().as_fraction()))));
+    auto& line_height_value_slot = style.m_property_values[to_underlying(CSS::PropertyID::LineHeight)].style;
+    if (line_height_value_slot && line_height_value_slot->is_percentage()) {
+        line_height_value_slot = LengthStyleValue::create(
+            Length::make_px(CSSPixels::nearest_value_for(font_size * static_cast<double>(line_height_value_slot->as_percentage().percentage().as_fraction()))));
     }
 
     auto line_height = style.compute_line_height(viewport_rect(), font_metrics, m_root_element_font_metrics);
     font_metrics.line_height = line_height;
 
     // NOTE: line-height might be using lh which should be resolved against the parent line height (like we did here already)
-    if (line_height_value_slot.has_value() && (*line_height_value_slot)->is_length())
-        (*line_height_value_slot) = LengthStyleValue::create(Length::make_px(line_height));
+    if (line_height_value_slot && line_height_value_slot->is_length())
+        line_height_value_slot = LengthStyleValue::create(Length::make_px(line_height));
 
     for (size_t i = 0; i < style.m_property_values.size(); ++i) {
         auto& value_slot = style.m_property_values[i];
-        if (!value_slot.has_value())
+        if (!value_slot.style)
             continue;
-        value_slot->style = value_slot->style->absolutized(viewport_rect(), font_metrics, m_root_element_font_metrics);
+        value_slot.style = value_slot.style->absolutized(viewport_rect(), font_metrics, m_root_element_font_metrics);
     }
 
     style.set_line_height({}, line_height);
+}
+
+void StyleComputer::resolve_effective_overflow_values(StyleProperties& style) const
+{
+    // https://www.w3.org/TR/css-overflow-3/#overflow-control
+    // The visible/clip values of overflow compute to auto/hidden (respectively) if one of overflow-x or
+    // overflow-y is neither visible nor clip.
+    auto overflow_x = value_id_to_overflow(style.property(PropertyID::OverflowX)->to_identifier());
+    auto overflow_y = value_id_to_overflow(style.property(PropertyID::OverflowY)->to_identifier());
+    auto overflow_x_is_visible_or_clip = overflow_x == Overflow::Visible || overflow_x == Overflow::Clip;
+    auto overflow_y_is_visible_or_clip = overflow_y == Overflow::Visible || overflow_y == Overflow::Clip;
+    if (!overflow_x_is_visible_or_clip || !overflow_y_is_visible_or_clip) {
+        if (overflow_x == CSS::Overflow::Visible)
+            style.set_property(CSS::PropertyID::OverflowX, IdentifierStyleValue::create(CSS::ValueID::Auto), nullptr);
+        if (overflow_x == CSS::Overflow::Clip)
+            style.set_property(CSS::PropertyID::OverflowX, IdentifierStyleValue::create(CSS::ValueID::Hidden), nullptr);
+        if (overflow_y == CSS::Overflow::Visible)
+            style.set_property(CSS::PropertyID::OverflowY, IdentifierStyleValue::create(CSS::ValueID::Auto), nullptr);
+        if (overflow_y == CSS::Overflow::Clip)
+            style.set_property(CSS::PropertyID::OverflowY, IdentifierStyleValue::create(CSS::ValueID::Hidden), nullptr);
+    }
 }
 
 enum class BoxTypeTransformation {
@@ -2087,25 +2386,24 @@ NonnullRefPtr<StyleProperties> StyleComputer::create_document_style() const
     return style;
 }
 
-ErrorOr<NonnullRefPtr<StyleProperties>> StyleComputer::compute_style(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element) const
+NonnullRefPtr<StyleProperties> StyleComputer::compute_style(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element) const
 {
-    auto style = TRY(compute_style_impl(element, move(pseudo_element), ComputeStyleMode::Normal));
-    return style.release_nonnull();
+    return compute_style_impl(element, move(pseudo_element), ComputeStyleMode::Normal).release_nonnull();
 }
 
-ErrorOr<RefPtr<StyleProperties>> StyleComputer::compute_pseudo_element_style_if_needed(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element) const
+RefPtr<StyleProperties> StyleComputer::compute_pseudo_element_style_if_needed(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element) const
 {
     return compute_style_impl(element, move(pseudo_element), ComputeStyleMode::CreatePseudoElementStyleIfNeeded);
 }
 
-ErrorOr<RefPtr<StyleProperties>> StyleComputer::compute_style_impl(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, ComputeStyleMode mode) const
+RefPtr<StyleProperties> StyleComputer::compute_style_impl(DOM::Element& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, ComputeStyleMode mode) const
 {
     build_rule_cache_if_needed();
 
     // Special path for elements that use pseudo element as style selector
     if (element.use_pseudo_element().has_value()) {
         auto& parent_element = verify_cast<HTML::HTMLElement>(*element.root().parent_or_shadow_host());
-        auto style = TRY(compute_style(parent_element, *element.use_pseudo_element()));
+        auto style = compute_style(parent_element, *element.use_pseudo_element());
 
         // Merge back inline styles
         if (element.has_attribute(HTML::AttributeNames::style)) {
@@ -2119,7 +2417,7 @@ ErrorOr<RefPtr<StyleProperties>> StyleComputer::compute_style_impl(DOM::Element&
     auto style = StyleProperties::create();
     // 1. Perform the cascade. This produces the "specified style"
     bool did_match_any_pseudo_element_rules = false;
-    TRY(compute_cascaded_values(style, element, pseudo_element, did_match_any_pseudo_element_rules, mode));
+    compute_cascaded_values(style, element, pseudo_element, did_match_any_pseudo_element_rules, mode);
 
     if (mode == ComputeStyleMode::CreatePseudoElementStyleIfNeeded && !did_match_any_pseudo_element_rules)
         return nullptr;
@@ -2139,6 +2437,12 @@ ErrorOr<RefPtr<StyleProperties>> StyleComputer::compute_style_impl(DOM::Element&
     // 6. Run automatic box type transformations
     transform_box_type_if_needed(style, element, pseudo_element);
 
+    // 7. Resolve effective overflow values
+    resolve_effective_overflow_values(style);
+
+    // 8. Let the element adjust computed style
+    element.adjust_computed_style(style);
+
     return style;
 }
 
@@ -2157,28 +2461,43 @@ NonnullOwnPtr<StyleComputer::RuleCache> StyleComputer::make_rule_cache_for_casca
     size_t num_id_rules = 0;
     size_t num_tag_name_rules = 0;
     size_t num_pseudo_element_rules = 0;
+    size_t num_root_rules = 0;
+    size_t num_attribute_rules = 0;
 
     Vector<MatchingRule> matching_rules;
     size_t style_sheet_index = 0;
-    for_each_stylesheet(cascade_origin, [&](auto& sheet) {
+    for_each_stylesheet(cascade_origin, [&](auto& sheet, JS::GCPtr<DOM::ShadowRoot> shadow_root) {
         size_t rule_index = 0;
         sheet.for_each_effective_style_rule([&](auto const& rule) {
             size_t selector_index = 0;
             for (CSS::Selector const& selector : rule.selectors()) {
                 MatchingRule matching_rule {
+                    shadow_root,
                     &rule,
                     sheet,
                     style_sheet_index,
                     rule_index,
                     selector_index,
-                    selector.specificity()
+                    selector.specificity(),
+                    cascade_origin,
+                    false,
+                    false,
+                    SelectorEngine::can_use_fast_matches(selector),
                 };
 
                 for (auto const& simple_selector : selector.compound_selectors().last().simple_selectors) {
-                    if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoElement) {
-                        matching_rule.contains_pseudo_element = true;
-                        ++num_pseudo_element_rules;
-                        break;
+                    if (!matching_rule.contains_pseudo_element) {
+                        if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoElement) {
+                            matching_rule.contains_pseudo_element = true;
+                            ++num_pseudo_element_rules;
+                        }
+                    }
+                    if (!matching_rule.contains_root_pseudo_class) {
+                        if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoClass
+                            && simple_selector.pseudo_class().type == CSS::PseudoClass::Root) {
+                            matching_rule.contains_root_pseudo_class = true;
+                            ++num_root_rules;
+                        }
                     }
                 }
 
@@ -2203,96 +2522,64 @@ NonnullOwnPtr<StyleComputer::RuleCache> StyleComputer::make_rule_cache_for_casca
                         break;
                     }
                 }
-                if (!added_to_bucket)
-                    rule_cache->other_rules.append(move(matching_rule));
+                if (!added_to_bucket) {
+                    if (matching_rule.contains_pseudo_element) {
+                        rule_cache->pseudo_element_rules.append(move(matching_rule));
+                    } else if (matching_rule.contains_root_pseudo_class) {
+                        rule_cache->root_rules.append(move(matching_rule));
+                    } else {
+                        for (auto const& simple_selector : selector.compound_selectors().last().simple_selectors) {
+                            if (simple_selector.type == CSS::Selector::SimpleSelector::Type::Attribute) {
+                                rule_cache->rules_by_attribute_name.ensure(simple_selector.attribute().qualified_name.name.lowercase_name).append(move(matching_rule));
+                                ++num_attribute_rules;
+                                added_to_bucket = true;
+                                break;
+                            }
+                        }
+                        if (!added_to_bucket) {
+                            rule_cache->other_rules.append(move(matching_rule));
+                        }
+                    }
+                }
 
                 ++selector_index;
             }
             ++rule_index;
         });
 
+        // Loosely based on https://drafts.csswg.org/css-animations-2/#keyframe-processing
         sheet.for_each_effective_keyframes_at_rule([&](CSSKeyframesRule const& rule) {
-            auto keyframe_set = make<AnimationKeyFrameSet>();
-            AnimationKeyFrameSet::ResolvedKeyFrame resolved_keyframe;
+            auto keyframe_set = adopt_ref(*new Animations::KeyframeEffect::KeyFrameSet);
+            HashTable<PropertyID> animated_properties;
 
             // Forwards pass, resolve all the user-specified keyframe properties.
             for (auto const& keyframe : rule.keyframes()) {
-                auto key = static_cast<u64>(keyframe->key().value() * AnimationKeyFrameKeyScaleFactor);
+                Animations::KeyframeEffect::KeyFrameSet::ResolvedKeyFrame resolved_keyframe;
+
+                auto key = static_cast<u64>(keyframe->key().value() * Animations::KeyframeEffect::AnimationKeyFrameKeyScaleFactor);
                 auto keyframe_rule = keyframe->style();
 
                 if (!is<PropertyOwningCSSStyleDeclaration>(*keyframe_rule))
                     continue;
 
-                auto current_keyframe = resolved_keyframe;
-                auto& keyframe_style = static_cast<PropertyOwningCSSStyleDeclaration const&>(*keyframe_rule);
-                for (auto& property : keyframe_style.properties())
-                    current_keyframe.resolved_properties[to_underlying(property.property_id)] = property.value;
+                auto const& keyframe_style = static_cast<PropertyOwningCSSStyleDeclaration const&>(*keyframe_rule);
+                for (auto const& it : keyframe_style.properties()) {
+                    // Unresolved properties will be resolved in collect_animation_into()
+                    for_each_property_expanding_shorthands(it.property_id, it.value, AllowUnresolved::Yes, [&](PropertyID shorthand_id, StyleValue const& shorthand_value) {
+                        animated_properties.set(shorthand_id);
+                        resolved_keyframe.properties.set(shorthand_id, NonnullRefPtr<StyleValue const> { shorthand_value });
+                    });
+                }
 
-                resolved_keyframe = move(current_keyframe);
                 keyframe_set->keyframes_by_key.insert(key, resolved_keyframe);
             }
 
-            // If there is no 'from' keyframe, make a synthetic one.
-            auto made_a_synthetic_from_keyframe = false;
-            if (!keyframe_set->keyframes_by_key.find(0)) {
-                keyframe_set->keyframes_by_key.insert(0, AnimationKeyFrameSet::ResolvedKeyFrame());
-                made_a_synthetic_from_keyframe = true;
-            }
-
-            // Backwards pass, resolve all the implied properties, go read <https://drafts.csswg.org/css-animations-2/#keyframe-processing> to see why.
-            auto first = true;
-            for (auto const& keyframe : rule.keyframes().in_reverse()) {
-                auto key = static_cast<u64>(keyframe->key().value() * AnimationKeyFrameKeyScaleFactor);
-                auto keyframe_rule = keyframe->style();
-
-                if (!is<PropertyOwningCSSStyleDeclaration>(*keyframe_rule))
-                    continue;
-
-                // The last keyframe is already fully resolved.
-                if (first) {
-                    first = false;
-                    continue;
-                }
-
-                auto next_keyframe = resolved_keyframe;
-                auto& current_keyframes = *keyframe_set->keyframes_by_key.find(key);
-
-                for (auto it = next_keyframe.resolved_properties.begin(); !it.is_end(); ++it) {
-                    auto& current_property = current_keyframes.resolved_properties[it.index()];
-                    if (!current_property.has<Empty>() || it->has<Empty>())
-                        continue;
-
-                    if (key == 0)
-                        current_property = AnimationKeyFrameSet::ResolvedKeyFrame::UseInitial();
-                    else
-                        current_property = *it;
-                }
-
-                resolved_keyframe = current_keyframes;
-            }
-
-            if (made_a_synthetic_from_keyframe && !first) {
-                auto next_keyframe = resolved_keyframe;
-                auto& current_keyframes = *keyframe_set->keyframes_by_key.find(0);
-
-                for (auto it = next_keyframe.resolved_properties.begin(); !it.is_end(); ++it) {
-                    auto& current_property = current_keyframes.resolved_properties[it.index()];
-                    if (!current_property.has<Empty>() || it->has<Empty>())
-                        continue;
-                    current_property = AnimationKeyFrameSet::ResolvedKeyFrame::UseInitial();
-                }
-
-                resolved_keyframe = current_keyframes;
-            }
+            Animations::KeyframeEffect::generate_initial_and_final_frames(keyframe_set, animated_properties);
 
             if constexpr (LIBWEB_CSS_DEBUG) {
                 dbgln("Resolved keyframe set '{}' into {} keyframes:", rule.name(), keyframe_set->keyframes_by_key.size());
-                for (auto it = keyframe_set->keyframes_by_key.begin(); it != keyframe_set->keyframes_by_key.end(); ++it) {
-                    size_t props = 0;
-                    for (auto& entry : it->resolved_properties)
-                        props += !entry.has<Empty>();
-                    dbgln("    - keyframe {}: {} properties", it.key(), props);
-                }
+                for (auto it = keyframe_set->keyframes_by_key.begin(); it != keyframe_set->keyframes_by_key.end(); ++it)
+                    dbgln("    - keyframe {}: {} properties", it.key(), it->properties.size());
             }
 
             rule_cache->rules_by_animation_keyframes.set(rule.name(), move(keyframe_set));
@@ -2300,14 +2587,17 @@ NonnullOwnPtr<StyleComputer::RuleCache> StyleComputer::make_rule_cache_for_casca
         ++style_sheet_index;
     });
 
+    size_t total_rules = num_class_rules + num_id_rules + num_tag_name_rules + num_pseudo_element_rules + num_root_rules + num_attribute_rules + rule_cache->other_rules.size();
     if constexpr (LIBWEB_CSS_DEBUG) {
         dbgln("Built rule cache!");
         dbgln("           ID: {}", num_id_rules);
         dbgln("        Class: {}", num_class_rules);
         dbgln("      TagName: {}", num_tag_name_rules);
         dbgln("PseudoElement: {}", num_pseudo_element_rules);
+        dbgln("         Root: {}", num_root_rules);
+        dbgln("    Attribute: {}", num_attribute_rules);
         dbgln("        Other: {}", rule_cache->other_rules.size());
-        dbgln("        Total: {}", num_class_rules + num_id_rules + num_tag_name_rules + rule_cache->other_rules.size());
+        dbgln("        Total: {}", total_rules);
     }
     return rule_cache;
 }
@@ -2343,40 +2633,54 @@ void StyleComputer::did_load_font(FlyString const&)
     document().invalidate_style();
 }
 
+Optional<FontLoader&> StyleComputer::load_font_face(ParsedFontFace const& font_face, Function<void(FontLoader const&)> on_load, Function<void()> on_fail)
+{
+    if (font_face.sources().is_empty()) {
+        if (on_fail)
+            on_fail();
+        return {};
+    }
+
+    FontFaceKey key {
+        .family_name = font_face.font_family(),
+        .weight = font_face.weight().value_or(0),
+        .slope = font_face.slope().value_or(0),
+    };
+
+    Vector<URL::URL> urls;
+    for (auto const& source : font_face.sources()) {
+        // FIXME: These should be loaded relative to the stylesheet URL instead of the document URL.
+        if (source.local_or_url.has<URL::URL>())
+            urls.append(m_document->parse_url(MUST(source.local_or_url.get<URL::URL>().to_string())));
+        // FIXME: Handle local()
+    }
+
+    if (urls.is_empty()) {
+        if (on_fail)
+            on_fail();
+        return {};
+    }
+
+    auto loader = make<FontLoader>(const_cast<StyleComputer&>(*this), font_face.font_family(), font_face.unicode_ranges(), move(urls), move(on_load), move(on_fail));
+    auto& loader_ref = *loader;
+    auto maybe_font_loaders_list = const_cast<StyleComputer&>(*this).m_loaded_fonts.get(key);
+    if (maybe_font_loaders_list.has_value()) {
+        maybe_font_loaders_list->append(move(loader));
+    } else {
+        FontLoaderList loaders;
+        loaders.append(move(loader));
+        const_cast<StyleComputer&>(*this).m_loaded_fonts.set(key, move(loaders));
+    }
+    // Actual object owned by font loader list inside m_loaded_fonts, this isn't use-after-move/free
+    return loader_ref;
+}
+
 void StyleComputer::load_fonts_from_sheet(CSSStyleSheet const& sheet)
 {
-    for (auto const& rule : static_cast<CSSStyleSheet const&>(sheet).rules()) {
+    for (auto const& rule : sheet.rules()) {
         if (!is<CSSFontFaceRule>(*rule))
             continue;
-        auto const& font_face = static_cast<CSSFontFaceRule const&>(*rule).font_face();
-        if (font_face.sources().is_empty())
-            continue;
-        FontFaceKey key {
-            .family_name = font_face.font_family(),
-            .weight = font_face.weight().value_or(0),
-            .slope = font_face.slope().value_or(0),
-        };
-
-        Vector<AK::URL> urls;
-        for (auto& source : font_face.sources()) {
-            // FIXME: These should be loaded relative to the stylesheet URL instead of the document URL.
-            if (source.local_or_url.has<AK::URL>())
-                urls.append(m_document->parse_url(MUST(source.local_or_url.get<AK::URL>().to_string())));
-            // FIXME: Handle local()
-        }
-
-        if (urls.is_empty())
-            continue;
-
-        auto loader = make<FontLoader>(const_cast<StyleComputer&>(*this), font_face.font_family(), font_face.unicode_ranges(), move(urls));
-        auto maybe_font_loaders_list = const_cast<StyleComputer&>(*this).m_loaded_fonts.get(key);
-        if (maybe_font_loaders_list.has_value()) {
-            maybe_font_loaders_list->append(move(loader));
-        } else {
-            FontLoaderList loaders;
-            loaders.append(move(loader));
-            const_cast<StyleComputer&>(*this).m_loaded_fonts.set(key, move(loaders));
-        }
+        (void)load_font_face(static_cast<CSSFontFaceRule const&>(*rule).font_face());
     }
 }
 
@@ -2431,6 +2735,37 @@ void StyleComputer::compute_math_depth(StyleProperties& style, DOM::Element cons
     }
     // - Otherwise, the computed value of math-depth of the element is the inherited one.
     style.set_math_depth(inherited_math_depth());
+}
+
+static void for_each_element_hash(DOM::Element const& element, auto callback)
+{
+    callback(element.local_name().hash());
+    if (element.id().has_value())
+        callback(element.id().value().hash());
+    for (auto const& class_ : element.class_names())
+        callback(class_.hash());
+    element.for_each_attribute([&](auto& attribute) {
+        callback(attribute.local_name().hash());
+    });
+}
+
+void StyleComputer::reset_ancestor_filter()
+{
+    m_ancestor_filter.clear();
+}
+
+void StyleComputer::push_ancestor(DOM::Element const& element)
+{
+    for_each_element_hash(element, [&](u32 hash) {
+        m_ancestor_filter.increment(hash);
+    });
+}
+
+void StyleComputer::pop_ancestor(DOM::Element const& element)
+{
+    for_each_element_hash(element, [&](u32 hash) {
+        m_ancestor_filter.decrement(hash);
+    });
 }
 
 }

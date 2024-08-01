@@ -8,6 +8,7 @@
 #include <AK/Utf16View.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/Utf16String.h>
+#include <LibWeb/Bindings/SVGTextPositioningElementPrototype.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/SVG/AttributeNames.h>
@@ -25,7 +26,7 @@ SVGTextPositioningElement::SVGTextPositioningElement(DOM::Document& document, DO
 void SVGTextPositioningElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SVGTextPositioningElementPrototype>(realm, "SVGTextPositioningElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGTextPositioningElement);
 }
 
 void SVGTextPositioningElement::attribute_changed(FlyString const& name, Optional<String> const& value)

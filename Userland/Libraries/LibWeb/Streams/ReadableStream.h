@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2022, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2024, Kenneth Myhra <kennethmyhra@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -26,6 +27,35 @@ struct ReadableStreamGetReaderOptions {
     Optional<Bindings::ReadableStreamReaderMode> mode;
 };
 
+struct ReadableWritablePair {
+    JS::GCPtr<ReadableStream> readable;
+    JS::GCPtr<WritableStream> writable;
+};
+
+struct StreamPipeOptions {
+    bool prevent_close { false };
+    bool prevent_abort { false };
+    bool prevent_cancel { false };
+    JS::GCPtr<DOM::AbortSignal> signal;
+};
+
+struct ReadableStreamPair {
+    // Define a couple container-like methods so this type may be used as the return type of the IDL `tee` implementation.
+    size_t size() const { return 2; }
+
+    JS::NonnullGCPtr<ReadableStream>& at(size_t index)
+    {
+        if (index == 0)
+            return first;
+        if (index == 1)
+            return second;
+        VERIFY_NOT_REACHED();
+    }
+
+    JS::NonnullGCPtr<ReadableStream> first;
+    JS::NonnullGCPtr<ReadableStream> second;
+};
+
 // https://streams.spec.whatwg.org/#readablestream
 class ReadableStream final : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(ReadableStream, Bindings::PlatformObject);
@@ -40,11 +70,19 @@ public:
 
     static WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> construct_impl(JS::Realm&, Optional<JS::Handle<JS::Object>> const& underlying_source, QueuingStrategy const& = {});
 
+    static WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> from(JS::VM& vm, JS::Value async_iterable);
+
     virtual ~ReadableStream() override;
 
     bool locked() const;
-    WebIDL::ExceptionOr<JS::GCPtr<JS::Object>> cancel(JS::Value reason);
+    JS::NonnullGCPtr<JS::Object> cancel(JS::Value reason);
     WebIDL::ExceptionOr<ReadableStreamReader> get_reader(ReadableStreamGetReaderOptions const& = {});
+    WebIDL::ExceptionOr<JS::NonnullGCPtr<ReadableStream>> pipe_through(ReadableWritablePair transform, StreamPipeOptions const& = {});
+    JS::NonnullGCPtr<JS::Object> pipe_to(WritableStream& destination, StreamPipeOptions const& = {});
+    WebIDL::ExceptionOr<ReadableStreamPair> tee();
+
+    void close();
+    void error(JS::Value);
 
     Optional<ReadableStreamController>& controller() { return m_controller; }
     void set_controller(Optional<ReadableStreamController> value) { m_controller = move(value); }

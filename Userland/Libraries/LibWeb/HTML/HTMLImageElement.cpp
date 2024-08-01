@@ -7,6 +7,7 @@
 #include <LibCore/Timer.h>
 #include <LibGfx/Bitmap.h>
 #include <LibWeb/ARIA/Roles.h>
+#include <LibWeb/Bindings/HTMLImageElementPrototype.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/DOM/Document.h>
@@ -55,7 +56,7 @@ void HTMLImageElement::finalize()
 void HTMLImageElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLImageElementPrototype>(realm, "HTMLImageElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLImageElement);
 
     m_current_request = ImageRequest::create(realm, document().page());
 }
@@ -77,13 +78,7 @@ void HTMLImageElement::visit_edges(Cell::Visitor& visitor)
 void HTMLImageElement::apply_presentational_hints(CSS::StyleProperties& style) const
 {
     for_each_attribute([&](auto& name, auto& value) {
-        if (name == HTML::AttributeNames::width) {
-            if (auto parsed_value = parse_dimension_value(value))
-                style.set_property(CSS::PropertyID::Width, parsed_value.release_nonnull());
-        } else if (name == HTML::AttributeNames::height) {
-            if (auto parsed_value = parse_dimension_value(value))
-                style.set_property(CSS::PropertyID::Height, parsed_value.release_nonnull());
-        } else if (name == HTML::AttributeNames::hspace) {
+        if (name == HTML::AttributeNames::hspace) {
             if (auto parsed_value = parse_dimension_value(value)) {
                 style.set_property(CSS::PropertyID::MarginLeft, *parsed_value);
                 style.set_property(CSS::PropertyID::MarginRight, *parsed_value);
@@ -97,10 +92,8 @@ void HTMLImageElement::apply_presentational_hints(CSS::StyleProperties& style) c
     });
 }
 
-void HTMLImageElement::attribute_changed(FlyString const& name, Optional<String> const& value)
+void HTMLImageElement::form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& value)
 {
-    HTMLElement::attribute_changed(name, value);
-
     if (name == HTML::AttributeNames::crossorigin) {
         m_cors_setting = cors_setting_attribute_from_keyword(value);
     }
@@ -111,7 +104,7 @@ void HTMLImageElement::attribute_changed(FlyString const& name, Optional<String>
 
     if (name == HTML::AttributeNames::alt) {
         if (layout_node())
-            verify_cast<Layout::ImageBox>(*layout_node()).dom_node_did_update_alt_text({});
+            did_update_alt_text(verify_cast<Layout::ImageBox>(*layout_node()));
     }
 }
 
@@ -130,6 +123,11 @@ RefPtr<Gfx::Bitmap const> HTMLImageElement::bitmap() const
     if (auto immutable_bitmap = this->immutable_bitmap())
         return immutable_bitmap->bitmap();
     return {};
+}
+
+bool HTMLImageElement::is_image_available() const
+{
+    return m_current_request && m_current_request->is_available();
 }
 
 Optional<CSSPixels> HTMLImageElement::intrinsic_width() const
@@ -271,6 +269,13 @@ bool HTMLImageElement::complete() const
     return false;
 }
 
+// https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-currentsrc
+String HTMLImageElement::current_src() const
+{
+    // The currentSrc IDL attribute must return the img element's current request's current URL.
+    return MUST(m_current_request->current_url().to_string());
+}
+
 Optional<ARIA::Role> HTMLImageElement::default_role() const
 {
     // https://www.w3.org/TR/html-aria/#el-img
@@ -295,7 +300,7 @@ bool HTMLImageElement::uses_srcset_or_picture() const
 struct BatchingDispatcher {
 public:
     BatchingDispatcher()
-        : m_timer(Core::Timer::create_single_shot(1, [this] { process(); }).release_value_but_fixme_should_propagate_errors())
+        : m_timer(Core::Timer::create_single_shot(1, [this] { process(); }))
     {
     }
 
@@ -369,7 +374,7 @@ ErrorOr<void> HTMLImageElement::update_the_image_data(bool restart_animations, b
         // 1. Parse selected source, relative to the element's node document.
         //    If that is not successful, then abort this inner set of steps.
         //    Otherwise, let urlString be the resulting URL string.
-        auto url_string = document().parse_url(selected_source.value().to_byte_string());
+        auto url_string = document().parse_url(selected_source.value());
         if (!url_string.is_valid())
             goto after_step_7;
 
@@ -425,7 +430,7 @@ ErrorOr<void> HTMLImageElement::update_the_image_data(bool restart_animations, b
     }
 after_step_7:
     // 8. Queue a microtask to perform the rest of this algorithm, allowing the task that invoked this algorithm to continue.
-    queue_a_microtask(&document(), [this, restart_animations, maybe_omit_events, previous_url]() mutable {
+    queue_a_microtask(&document(), JS::create_heap_function(this->heap(), [this, restart_animations, maybe_omit_events, previous_url]() mutable {
         // FIXME: 9. If another instance of this algorithm for this img element was started after this instance
         //           (even if it aborted and is no longer running), then return.
 
@@ -556,9 +561,10 @@ after_step_7:
             request->set_initiator(Fetch::Infrastructure::Request::Initiator::ImageSet);
 
         // 21. Set request's referrer policy to the current state of the element's referrerpolicy attribute.
-        request->set_referrer_policy(ReferrerPolicy::from_string(get_attribute_value(HTML::AttributeNames::referrerpolicy)));
+        request->set_referrer_policy(ReferrerPolicy::from_string(get_attribute_value(HTML::AttributeNames::referrerpolicy)).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString));
 
-        // FIXME: 22. Set request's priority to the current state of the element's fetchpriority attribute.
+        // 22. Set request's priority to the current state of the element's fetchpriority attribute.
+        request->set_priority(Fetch::Infrastructure::request_priority_from_string(get_attribute_value(HTML::AttributeNames::fetchpriority)).value_or(Fetch::Infrastructure::Request::Priority::Auto));
 
         // 24. If the will lazy load element steps given the img return true, then:
         if (will_lazy_load_element()) {
@@ -575,11 +581,11 @@ after_step_7:
         }
 
         image_request->fetch_image(realm(), request);
-    });
+    }));
     return {};
 }
 
-void HTMLImageElement::add_callbacks_to_image_request(JS::NonnullGCPtr<ImageRequest> image_request, bool maybe_omit_events, AK::URL const& url_string, AK::URL const& previous_url)
+void HTMLImageElement::add_callbacks_to_image_request(JS::NonnullGCPtr<ImageRequest> image_request, bool maybe_omit_events, URL::URL const& url_string, URL::URL const& previous_url)
 {
     image_request->add_callbacks(
         [this, image_request, maybe_omit_events, url_string, previous_url]() {
@@ -771,7 +777,7 @@ void HTMLImageElement::react_to_changes_in_the_environment()
         request->set_initiator(Fetch::Infrastructure::Request::Initiator::ImageSet);
 
         // 3. Set request's referrer policy to the current state of the element's referrerpolicy attribute.
-        request->set_referrer_policy(ReferrerPolicy::from_string(get_attribute_value(HTML::AttributeNames::referrerpolicy)));
+        request->set_referrer_policy(ReferrerPolicy::from_string(get_attribute_value(HTML::AttributeNames::referrerpolicy)).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString));
 
         // FIXME: 4. Set request's priority to the current state of the element's fetchpriority attribute.
 
@@ -835,7 +841,13 @@ void HTMLImageElement::handle_failed_fetch()
 void HTMLImageElement::restart_the_animation()
 {
     m_current_frame_index = 0;
-    m_animation_timer->start();
+
+    auto image_data = m_current_request->image_data();
+    if (image_data && image_data->frame_count() > 1) {
+        m_animation_timer->start();
+    } else {
+        m_animation_timer->stop();
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/images.html#update-the-source-set
@@ -860,6 +872,7 @@ static void update_the_source_set(DOM::Element& element)
         elements.clear();
         element.parent()->for_each_child_of_type<DOM::Element>([&](auto& child) {
             elements.append(&child);
+            return IterationDecision::Continue;
         });
     }
 
@@ -938,7 +951,7 @@ static void update_the_source_set(DOM::Element& element)
         if (child->has_attribute(HTML::AttributeNames::media)) {
             auto media_query = parse_media_query(CSS::Parser::ParsingContext { element.document() },
                 child->get_attribute_value(HTML::AttributeNames::media));
-            if (!media_query || !media_query->evaluate(element.document().window())) {
+            if (!media_query || !element.document().window() || !media_query->evaluate(*element.document().window())) {
                 continue;
             }
         }

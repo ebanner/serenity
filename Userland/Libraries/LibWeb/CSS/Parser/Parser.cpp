@@ -5,6 +5,8 @@
  * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
  * Copyright (c) 2022, MacDue <macdue@dueutil.tech>
  * Copyright (c) 2024, Shannon Booth <shannon@serenityos.org>
+ * Copyright (c) 2024, Tommy van der Vorst <tommy@pixelspark.nl>
+ * Copyright (c) 2024, Matthew Olsson <mattco@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -38,6 +40,7 @@
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BackgroundRepeatStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BackgroundSizeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BasicShapeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ContentStyleValue.h>
@@ -72,6 +75,7 @@
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
+#include <LibWeb/CSS/StyleValues/TransitionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/URLStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnsetStyleValue.h>
@@ -123,7 +127,7 @@ Parser::Parser(Parser&& other)
 // 5.3.3. Parse a stylesheet
 // https://www.w3.org/TR/css-syntax-3/#parse-stylesheet
 template<typename T>
-Parser::ParsedStyleSheet Parser::parse_a_stylesheet(TokenStream<T>& tokens, Optional<AK::URL> location)
+Parser::ParsedStyleSheet Parser::parse_a_stylesheet(TokenStream<T>& tokens, Optional<URL::URL> location)
 {
     // To parse a stylesheet from an input given an optional url location:
 
@@ -143,7 +147,7 @@ Parser::ParsedStyleSheet Parser::parse_a_stylesheet(TokenStream<T>& tokens, Opti
 }
 
 // https://www.w3.org/TR/css-syntax-3/#parse-a-css-stylesheet
-CSSStyleSheet* Parser::parse_as_css_stylesheet(Optional<AK::URL> location)
+CSSStyleSheet* Parser::parse_as_css_stylesheet(Optional<URL::URL> location)
 {
     // To parse a CSS stylesheet, first parse a stylesheet.
     auto style_sheet = parse_a_stylesheet(m_token_stream, {});
@@ -175,7 +179,7 @@ RefPtr<Supports> Parser::parse_a_supports(TokenStream<T>& tokens)
     auto maybe_condition = parse_supports_condition(token_stream);
     token_stream.skip_whitespace();
     if (maybe_condition && !token_stream.has_next_token())
-        return Supports::create(maybe_condition.release_nonnull());
+        return Supports::create(m_context.realm(), maybe_condition.release_nonnull());
 
     return {};
 }
@@ -300,7 +304,7 @@ Optional<Supports::Feature> Parser::parse_supports_feature(TokenStream<Component
         if (auto declaration = consume_a_declaration(block_tokens); declaration.has_value()) {
             transaction.commit();
             return Supports::Feature {
-                Supports::Declaration { declaration->to_string(), JS::make_handle(m_context.realm()) }
+                Supports::Declaration { declaration->to_string() }
             };
         }
     }
@@ -313,7 +317,7 @@ Optional<Supports::Feature> Parser::parse_supports_feature(TokenStream<Component
             builder.append(item.to_string());
         transaction.commit();
         return Supports::Feature {
-            Supports::Selector { builder.to_string().release_value_but_fixme_should_propagate_errors(), JS::make_handle(m_context.realm()) }
+            Supports::Selector { builder.to_string().release_value_but_fixme_should_propagate_errors() }
         };
     }
 
@@ -1159,11 +1163,11 @@ ElementInlineCSSStyleDeclaration* Parser::parse_as_style_attribute(DOM::Element&
     return ElementInlineCSSStyleDeclaration::create(element, move(properties), move(custom_properties));
 }
 
-Optional<AK::URL> Parser::parse_url_function(ComponentValue const& component_value)
+Optional<URL::URL> Parser::parse_url_function(ComponentValue const& component_value)
 {
     // FIXME: Handle list of media queries. https://www.w3.org/TR/css-cascade-3/#conditional-import
 
-    auto convert_string_to_url = [&](StringView url_string) -> Optional<AK::URL> {
+    auto convert_string_to_url = [&](StringView url_string) -> Optional<URL::URL> {
         auto url = m_context.complete_url(url_string);
         if (url.is_valid())
             return url;
@@ -1192,12 +1196,62 @@ Optional<AK::URL> Parser::parse_url_function(ComponentValue const& component_val
     return {};
 }
 
-RefPtr<StyleValue> Parser::parse_url_value(ComponentValue const& component_value)
+RefPtr<StyleValue> Parser::parse_url_value(TokenStream<ComponentValue>& tokens)
 {
-    auto url = parse_url_function(component_value);
+    auto url = parse_url_function(tokens.peek_token());
     if (!url.has_value())
         return nullptr;
+    (void)tokens.next_token();
     return URLStyleValue::create(*url);
+}
+
+RefPtr<StyleValue> Parser::parse_basic_shape_function(ComponentValue const& component_value)
+{
+    if (!component_value.is_function())
+        return nullptr;
+
+    auto function_name = component_value.function().name().bytes_as_string_view();
+
+    // FIXME: Implement other shapes. See: https://www.w3.org/TR/css-shapes-1/#basic-shape-functions
+    if (!function_name.equals_ignoring_ascii_case("polygon"sv))
+        return nullptr;
+
+    // polygon() = polygon( <'fill-rule'>? , [<length-percentage> <length-percentage>]# )
+    // FIXME: Parse the fill-rule.
+    auto arguments_tokens = TokenStream { component_value.function().values() };
+    auto arguments = parse_a_comma_separated_list_of_component_values(arguments_tokens);
+
+    Vector<Polygon::Point> points;
+    for (auto& argument : arguments) {
+        TokenStream argument_tokens { argument };
+
+        argument_tokens.skip_whitespace();
+        auto x_pos = parse_length_percentage(argument_tokens);
+        if (!x_pos.has_value())
+            return nullptr;
+
+        argument_tokens.skip_whitespace();
+        auto y_pos = parse_length_percentage(argument_tokens);
+        if (!y_pos.has_value())
+            return nullptr;
+
+        argument_tokens.skip_whitespace();
+        if (argument_tokens.has_next_token())
+            return nullptr;
+
+        points.append(Polygon::Point { *x_pos, *y_pos });
+    }
+
+    return BasicShapeStyleValue::create(Polygon { FillRule::Nonzero, move(points) });
+}
+
+RefPtr<StyleValue> Parser::parse_basic_shape_value(TokenStream<ComponentValue>& tokens)
+{
+    auto basic_shape = parse_basic_shape_function(tokens.peek_token());
+    if (!basic_shape)
+        return nullptr;
+    (void)tokens.next_token();
+    return basic_shape;
 }
 
 CSSRule* Parser::convert_to_rule(NonnullRefPtr<Rule> rule)
@@ -1214,7 +1268,7 @@ CSSRule* Parser::convert_to_rule(NonnullRefPtr<Rule> rule)
             return parse_font_face_rule(tokens);
         }
         if (rule->at_rule_name().equals_ignoring_ascii_case("import"sv) && !rule->prelude().is_empty()) {
-            Optional<AK::URL> url;
+            Optional<URL::URL> url;
             for (auto const& token : rule->prelude()) {
                 if (token.is(Token::Type::Whitespace))
                     continue;
@@ -2133,11 +2187,28 @@ Optional<Gfx::UnicodeRange> Parser::parse_unicode_range(StringView text)
     return make_valid_unicode_range(start_value, end_value);
 }
 
-RefPtr<StyleValue> Parser::parse_dimension_value(ComponentValue const& component_value)
+Vector<Gfx::UnicodeRange> Parser::parse_unicode_ranges(TokenStream<ComponentValue>& tokens)
 {
-    auto dimension = parse_dimension(component_value);
+    Vector<Gfx::UnicodeRange> unicode_ranges;
+    auto range_token_lists = parse_a_comma_separated_list_of_component_values(tokens);
+    for (auto& range_tokens : range_token_lists) {
+        TokenStream range_token_stream { range_tokens };
+        auto maybe_unicode_range = parse_unicode_range(range_token_stream);
+        if (!maybe_unicode_range.has_value()) {
+            dbgln_if(CSS_PARSER_DEBUG, "CSSParser: unicode-range format invalid; discarding.");
+            return {};
+        }
+        unicode_ranges.append(maybe_unicode_range.release_value());
+    }
+    return unicode_ranges;
+}
+
+RefPtr<StyleValue> Parser::parse_dimension_value(TokenStream<ComponentValue>& tokens)
+{
+    auto dimension = parse_dimension(tokens.peek_token());
     if (!dimension.has_value())
         return nullptr;
+    (void)tokens.next_token(); // dimension
 
     if (dimension->is_angle())
         return AngleStyleValue::create(dimension->angle());
@@ -2191,12 +2262,15 @@ RefPtr<StyleValue> Parser::parse_number_or_percentage_value(TokenStream<Componen
     return nullptr;
 }
 
-RefPtr<StyleValue> Parser::parse_identifier_value(ComponentValue const& component_value)
+RefPtr<StyleValue> Parser::parse_identifier_value(TokenStream<ComponentValue>& tokens)
 {
-    if (component_value.is(Token::Type::Ident)) {
-        auto value_id = value_id_from_string(component_value.token().ident());
-        if (value_id.has_value())
+    auto peek_token = tokens.peek_token();
+    if (peek_token.is(Token::Type::Ident)) {
+        auto value_id = value_id_from_string(peek_token.token().ident());
+        if (value_id.has_value()) {
+            (void)tokens.next_token(); // ident
             return IdentifierStyleValue::create(value_id.value());
+        }
     }
 
     return nullptr;
@@ -2336,13 +2410,15 @@ Optional<Color> Parser::parse_rgb_or_hsl_color(StringView function_name, Vector<
 }
 
 // https://www.w3.org/TR/CSS2/visufx.html#value-def-shape
-RefPtr<StyleValue> Parser::parse_rect_value(ComponentValue const& component_value)
+RefPtr<StyleValue> Parser::parse_rect_value(TokenStream<ComponentValue>& tokens)
 {
-    if (!component_value.is_function("rect"sv))
+    auto transaction = tokens.begin_transaction();
+    auto function_token = tokens.next_token();
+    if (!function_token.is_function("rect"sv))
         return nullptr;
 
     Vector<Length, 4> params;
-    auto tokens = TokenStream { component_value.function().values() };
+    auto argument_tokens = TokenStream { function_token.function().values() };
 
     enum class CommaRequirement {
         Unknown,
@@ -2363,30 +2439,30 @@ RefPtr<StyleValue> Parser::parse_rect_value(ComponentValue const& component_valu
     // <top> and <bottom> specify offsets from the top border edge of the box, and <right>, and
     //  <left> specify offsets from the left border edge of the box.
     for (size_t side = 0; side < 4; side++) {
-        tokens.skip_whitespace();
+        argument_tokens.skip_whitespace();
 
         // <top>, <right>, <bottom>, and <left> may either have a <length> value or 'auto'.
         // Negative lengths are permitted.
-        if (tokens.peek_token().is_ident("auto"sv)) {
-            (void)tokens.next_token(); // `auto`
+        if (argument_tokens.peek_token().is_ident("auto"sv)) {
+            (void)argument_tokens.next_token(); // `auto`
             params.append(Length::make_auto());
         } else {
-            auto maybe_length = parse_length(tokens);
+            auto maybe_length = parse_length(argument_tokens);
             if (!maybe_length.has_value())
                 return nullptr;
             // FIXME: Support calculated lengths
             params.append(maybe_length.value().value());
         }
-        tokens.skip_whitespace();
+        argument_tokens.skip_whitespace();
 
         // The last side, should be no more tokens following it.
         if (static_cast<Side>(side) == Side::Left) {
-            if (tokens.has_next_token())
+            if (argument_tokens.has_next_token())
                 return nullptr;
             break;
         }
 
-        bool next_is_comma = tokens.peek_token().is(Token::Type::Comma);
+        bool next_is_comma = argument_tokens.peek_token().is(Token::Type::Comma);
 
         // Authors should separate offset values with commas. User agents must support separation
         // with commas, but may also support separation without commas (but not a combination),
@@ -2396,7 +2472,7 @@ RefPtr<StyleValue> Parser::parse_rect_value(ComponentValue const& component_valu
 
         if (comma_requirement == CommaRequirement::RequiresCommas) {
             if (next_is_comma)
-                tokens.next_token();
+                argument_tokens.next_token();
             else
                 return nullptr;
         } else if (comma_requirement == CommaRequirement::RequiresNoCommas) {
@@ -2407,6 +2483,7 @@ RefPtr<StyleValue> Parser::parse_rect_value(ComponentValue const& component_valu
         }
     }
 
+    transaction.commit();
     return RectStyleValue::create(EdgeRect { params[0], params[1], params[2], params[3] });
 }
 
@@ -2495,16 +2572,22 @@ Optional<Color> Parser::parse_color(ComponentValue const& component_value)
     return {};
 }
 
-RefPtr<StyleValue> Parser::parse_color_value(ComponentValue const& component_value)
+RefPtr<StyleValue> Parser::parse_color_value(TokenStream<ComponentValue>& tokens)
 {
-    auto color = parse_color(component_value);
-    if (color.has_value())
+    auto transaction = tokens.begin_transaction();
+    auto component_value = tokens.next_token();
+
+    if (auto color = parse_color(component_value); color.has_value()) {
+        transaction.commit();
         return ColorStyleValue::create(color.value());
+    }
 
     if (component_value.is(Token::Type::Ident)) {
         auto ident = value_id_from_string(component_value.token().ident());
-        if (ident.has_value() && IdentifierStyleValue::is_color(ident.value()))
+        if (ident.has_value() && IdentifierStyleValue::is_color(ident.value())) {
+            transaction.commit();
             return IdentifierStyleValue::create(ident.value());
+        }
     }
 
     return nullptr;
@@ -2517,26 +2600,39 @@ RefPtr<StyleValue> Parser::parse_ratio_value(TokenStream<ComponentValue>& tokens
     return nullptr;
 }
 
-RefPtr<StyleValue> Parser::parse_string_value(ComponentValue const& component_value)
+RefPtr<StyleValue> Parser::parse_string_value(TokenStream<ComponentValue>& tokens)
 {
-    if (component_value.is(Token::Type::String))
-        return StringStyleValue::create(component_value.token().string().to_string());
+    auto peek = tokens.peek_token();
+    if (peek.is(Token::Type::String)) {
+        (void)tokens.next_token();
+        return StringStyleValue::create(peek.token().string().to_string());
+    }
 
     return nullptr;
 }
 
-RefPtr<StyleValue> Parser::parse_image_value(ComponentValue const& component_value)
+RefPtr<StyleValue> Parser::parse_image_value(TokenStream<ComponentValue>& tokens)
 {
-    auto url = parse_url_function(component_value);
-    if (url.has_value())
+    auto transaction = tokens.begin_transaction();
+    auto& token = tokens.next_token();
+
+    if (auto url = parse_url_function(token); url.has_value()) {
+        transaction.commit();
         return ImageStyleValue::create(url.value());
-    auto linear_gradient = parse_linear_gradient_function(component_value);
-    if (linear_gradient)
+    }
+    if (auto linear_gradient = parse_linear_gradient_function(token)) {
+        transaction.commit();
         return linear_gradient;
-    auto conic_gradient = parse_conic_gradient_function(component_value);
-    if (conic_gradient)
+    }
+    if (auto conic_gradient = parse_conic_gradient_function(token)) {
+        transaction.commit();
         return conic_gradient;
-    return parse_radial_gradient_function(component_value);
+    }
+    if (auto radial_gradient = parse_radial_gradient_function(token)) {
+        transaction.commit();
+        return radial_gradient;
+    }
+    return nullptr;
 }
 
 // https://svgwg.org/svg2-draft/painting.html#SpecifyingPaint
@@ -2545,10 +2641,8 @@ RefPtr<StyleValue> Parser::parse_paint_value(TokenStream<ComponentValue>& tokens
     // `<paint> = none | <color> | <url> [none | <color>]? | context-fill | context-stroke`
 
     auto parse_color_or_none = [&]() -> Optional<RefPtr<StyleValue>> {
-        if (auto color = parse_color_value(tokens.peek_token())) {
-            (void)tokens.next_token();
+        if (auto color = parse_color_value(tokens))
             return color;
-        }
 
         // NOTE: <color> also accepts identifiers, so we do this identifier check last.
         if (tokens.peek_token().is(Token::Type::Ident)) {
@@ -2572,8 +2666,7 @@ RefPtr<StyleValue> Parser::parse_paint_value(TokenStream<ComponentValue>& tokens
     if (auto color_or_none = parse_color_or_none(); color_or_none.has_value())
         return *color_or_none;
 
-    if (auto url = parse_url_value(tokens.peek_token())) {
-        (void)tokens.next_token();
+    if (auto url = parse_url_value(tokens)) {
         tokens.skip_whitespace();
         if (auto color_or_none = parse_color_or_none(); color_or_none == nullptr) {
             // Fail to parse if the fallback is invalid, but otherwise ignore it.
@@ -3587,7 +3680,7 @@ RefPtr<StyleValue> Parser::parse_shadow_value(TokenStream<ComponentValue>& token
 {
     // "none"
     if (contains_single_none_ident(tokens))
-        return parse_identifier_value(tokens.next_token());
+        return parse_identifier_value(tokens);
 
     return parse_comma_separated_value_list(tokens, [this, allow_inset_keyword](auto& tokens) {
         return parse_single_shadow_value(tokens, allow_inset_keyword);
@@ -3701,8 +3794,6 @@ RefPtr<StyleValue> Parser::parse_content_value(TokenStream<ComponentValue>& toke
 {
     // FIXME: `content` accepts several kinds of function() type, which we don't handle in property_accepts_value() yet.
 
-    auto transaction = tokens.begin_transaction();
-
     auto is_single_value_identifier = [](ValueID identifier) -> bool {
         switch (identifier) {
         case ValueID::None:
@@ -3714,14 +3805,16 @@ RefPtr<StyleValue> Parser::parse_content_value(TokenStream<ComponentValue>& toke
     };
 
     if (tokens.remaining_token_count() == 1) {
-        if (auto identifier = parse_identifier_value(tokens.peek_token())) {
+        auto transaction = tokens.begin_transaction();
+        if (auto identifier = parse_identifier_value(tokens)) {
             if (is_single_value_identifier(identifier->to_identifier())) {
-                (void)tokens.next_token();
                 transaction.commit();
                 return identifier;
             }
         }
     }
+
+    auto transaction = tokens.begin_transaction();
 
     StyleValueVector content_values;
     StyleValueVector alt_text_values;
@@ -3770,7 +3863,7 @@ RefPtr<StyleValue> Parser::parse_display_value(TokenStream<ComponentValue>& toke
 {
     auto parse_single_component_display = [this](TokenStream<ComponentValue>& tokens) -> Optional<Display> {
         auto transaction = tokens.begin_transaction();
-        if (auto identifier_value = parse_identifier_value(tokens.next_token())) {
+        if (auto identifier_value = parse_identifier_value(tokens)) {
             auto identifier = identifier_value->to_identifier();
             if (identifier == ValueID::ListItem) {
                 transaction.commit();
@@ -3848,8 +3941,7 @@ RefPtr<StyleValue> Parser::parse_display_value(TokenStream<ComponentValue>& toke
 
         auto transaction = tokens.begin_transaction();
         while (tokens.has_next_token()) {
-            auto& token = tokens.next_token();
-            if (auto value = parse_identifier_value(token)) {
+            if (auto value = parse_identifier_value(tokens)) {
                 auto identifier = value->to_identifier();
                 if (identifier == ValueID::ListItem) {
                     if (list_item == Display::ListItem::Yes)
@@ -3872,7 +3964,7 @@ RefPtr<StyleValue> Parser::parse_display_value(TokenStream<ComponentValue>& toke
             }
 
             // Not a display value, abort.
-            dbgln_if(CSS_PARSER_DEBUG, "Unrecognized display value: `{}`", token.to_string());
+            dbgln_if(CSS_PARSER_DEBUG, "Unrecognized display value: `{}`", tokens.peek_token().to_string());
             return {};
         }
 
@@ -3903,7 +3995,7 @@ RefPtr<StyleValue> Parser::parse_filter_value_list_value(TokenStream<ComponentVa
 
     if (contains_single_none_ident(tokens)) {
         transaction.commit();
-        return parse_identifier_value(tokens.next_token());
+        return parse_identifier_value(tokens);
     }
 
     // FIXME: <url>s are ignored for now
@@ -4422,7 +4514,7 @@ CSSRule* Parser::parse_font_face_rule(TokenStream<ComponentValue>& tokens)
     auto declarations_and_at_rules = parse_a_list_of_declarations(tokens);
 
     Optional<FlyString> font_family;
-    Vector<FontFace::Source> src;
+    Vector<ParsedFontFace::Source> src;
     Vector<Gfx::UnicodeRange> unicode_range;
     Optional<int> weight;
     Optional<int> slope;
@@ -4494,28 +4586,15 @@ CSSRule* Parser::parse_font_face_rule(TokenStream<ComponentValue>& tokens)
         }
         if (declaration.name().equals_ignoring_ascii_case("src"sv)) {
             TokenStream token_stream { declaration.values() };
-            Vector<FontFace::Source> supported_sources = parse_font_face_src(token_stream);
+            Vector<ParsedFontFace::Source> supported_sources = parse_font_face_src(token_stream);
             if (!supported_sources.is_empty())
                 src = move(supported_sources);
             continue;
         }
         if (declaration.name().equals_ignoring_ascii_case("unicode-range"sv)) {
-            Vector<Gfx::UnicodeRange> unicode_ranges;
-            bool unicode_range_invalid = false;
-            TokenStream all_tokens { declaration.values() };
-            auto range_token_lists = parse_a_comma_separated_list_of_component_values(all_tokens);
-            for (auto& range_tokens : range_token_lists) {
-                TokenStream range_token_stream { range_tokens };
-                auto maybe_unicode_range = parse_unicode_range(range_token_stream);
-                if (!maybe_unicode_range.has_value()) {
-                    dbgln_if(CSS_PARSER_DEBUG, "CSSParser: @font-face unicode-range format invalid; discarding.");
-                    unicode_range_invalid = true;
-                    break;
-                }
-                unicode_ranges.append(maybe_unicode_range.release_value());
-            }
-
-            if (unicode_range_invalid || unicode_ranges.is_empty())
+            TokenStream token_stream { declaration.values() };
+            auto unicode_ranges = parse_unicode_ranges(token_stream);
+            if (unicode_ranges.is_empty())
                 continue;
 
             unicode_range = move(unicode_ranges);
@@ -4534,10 +4613,16 @@ CSSRule* Parser::parse_font_face_rule(TokenStream<ComponentValue>& tokens)
         unicode_range.empend(0x0u, 0x10FFFFu);
     }
 
-    return CSSFontFaceRule::create(m_context.realm(), FontFace { font_family.release_value(), weight, slope, move(src), move(unicode_range) });
+    return CSSFontFaceRule::create(m_context.realm(), ParsedFontFace { font_family.release_value(), weight, slope, move(src), move(unicode_range) });
 }
 
-Vector<FontFace::Source> Parser::parse_font_face_src(TokenStream<ComponentValue>& component_values)
+Vector<ParsedFontFace::Source> Parser::parse_as_font_face_src()
+{
+    return parse_font_face_src(m_token_stream);
+}
+
+template<typename T>
+Vector<ParsedFontFace::Source> Parser::parse_font_face_src(TokenStream<T>& component_values)
 {
     // FIXME: Get this information from the system somehow?
     // Format-name table: https://www.w3.org/TR/css-fonts-4/#font-format-definitions
@@ -4548,7 +4633,7 @@ Vector<FontFace::Source> Parser::parse_font_face_src(TokenStream<ComponentValue>
         return false;
     };
 
-    Vector<FontFace::Source> supported_sources;
+    Vector<ParsedFontFace::Source> supported_sources;
 
     auto list_of_source_token_lists = parse_a_comma_separated_list_of_component_values(component_values);
     for (auto const& source_token_list : list_of_source_token_lists) {
@@ -4855,7 +4940,7 @@ RefPtr<StyleValue> Parser::parse_quotes_value(TokenStream<ComponentValue>& token
     auto transaction = tokens.begin_transaction();
 
     if (tokens.remaining_token_count() == 1) {
-        auto identifier = parse_identifier_value(tokens.next_token());
+        auto identifier = parse_identifier_value(tokens);
         if (identifier && property_accepts_identifier(PropertyID::Quotes, identifier->to_identifier())) {
             transaction.commit();
             return identifier;
@@ -4869,7 +4954,7 @@ RefPtr<StyleValue> Parser::parse_quotes_value(TokenStream<ComponentValue>& token
 
     StyleValueVector string_values;
     while (tokens.has_next_token()) {
-        auto maybe_string = parse_string_value(tokens.next_token());
+        auto maybe_string = parse_string_value(tokens);
         if (!maybe_string)
             return nullptr;
 
@@ -5022,6 +5107,7 @@ RefPtr<StyleValue> Parser::parse_easing_value(TokenStream<ComponentValue>& token
             }
 
             auto& value = argument_values[0];
+            auto value_as_stream = TokenStream { argument_values };
             switch (function_metadata.parameters[argument_index].type) {
             case EasingFunctionParameterType::Number: {
                 if (value.is(Token::Type::Number))
@@ -5047,7 +5133,7 @@ RefPtr<StyleValue> Parser::parse_easing_value(TokenStream<ComponentValue>& token
             case EasingFunctionParameterType::StepPosition: {
                 if (!value.is(Token::Type::Ident))
                     return nullptr;
-                auto ident = parse_identifier_value(value);
+                auto ident = parse_identifier_value(value_as_stream);
                 if (!ident)
                     return nullptr;
                 switch (ident->to_identifier()) {
@@ -5077,8 +5163,12 @@ RefPtr<StyleValue> Parser::parse_easing_value(TokenStream<ComponentValue>& token
     return EasingStyleValue::create(function, move(values));
 }
 
+// https://www.w3.org/TR/css-transforms-1/#transform-property
 RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& tokens)
 {
+    // <transform> = none | <transform-list>
+    // <transform-list> = <transform-function>+
+
     if (contains_single_none_ident(tokens)) {
         tokens.next_token(); // none
         return IdentifierStyleValue::create(ValueID::None);
@@ -5086,7 +5176,6 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
 
     StyleValueVector transformations;
     auto transaction = tokens.begin_transaction();
-
     while (tokens.has_next_token()) {
         auto const& part = tokens.next_token();
         if (!part.is_function())
@@ -5097,15 +5186,23 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
         auto function = maybe_function.release_value();
         auto function_metadata = transform_function_metadata(function);
 
+        auto function_tokens = TokenStream { part.function().values() };
+        auto arguments = parse_a_comma_separated_list_of_component_values(function_tokens);
+
+        if (arguments.size() > function_metadata.parameters.size()) {
+            dbgln_if(CSS_PARSER_DEBUG, "Too many arguments to {}. max: {}", part.function().name(), function_metadata.parameters.size());
+            return nullptr;
+        }
+
+        if (arguments.size() < function_metadata.parameters.size() && function_metadata.parameters[arguments.size()].required) {
+            dbgln_if(CSS_PARSER_DEBUG, "Required parameter at position {} is missing", arguments.size());
+            return nullptr;
+        }
+
         StyleValueVector values;
-        auto argument_tokens = TokenStream { part.function().values() };
-        argument_tokens.skip_whitespace();
-        size_t argument_index = 0;
-        while (argument_tokens.has_next_token()) {
-            if (argument_index == function_metadata.parameters.size()) {
-                dbgln_if(CSS_PARSER_DEBUG, "Too many arguments to {}. max: {}", part.function().name(), function_metadata.parameters.size());
-                return nullptr;
-            }
+        for (auto argument_index = 0u; argument_index < arguments.size(); ++argument_index) {
+            TokenStream argument_tokens { arguments[argument_index] };
+            argument_tokens.skip_whitespace();
 
             auto const& value = argument_tokens.next_token();
             RefPtr<CalculatedStyleValue> maybe_calc_value = parse_calculated_value(value);
@@ -5118,7 +5215,9 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
                 } else if (value.is(Token::Type::Number) && value.token().number_value() == 0) {
                     values.append(AngleStyleValue::create(Angle::make_degrees(0)));
                 } else {
-                    auto dimension_value = parse_dimension_value(value);
+                    // FIXME: Remove this reconsume once all parsing functions are TokenStream-based.
+                    argument_tokens.reconsume_current_input_token();
+                    auto dimension_value = parse_dimension_value(argument_tokens);
                     if (!dimension_value || !dimension_value->is_angle())
                         return nullptr;
                     values.append(dimension_value.release_nonnull());
@@ -5128,25 +5227,27 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
             case TransformFunctionParameterType::Length:
             case TransformFunctionParameterType::LengthNone: {
                 if (maybe_calc_value && maybe_calc_value->resolves_to_length()) {
+                    (void)argument_tokens.next_token(); // calc()
                     values.append(maybe_calc_value.release_nonnull());
                 } else {
+                    // FIXME: Remove this reconsume once all parsing functions are TokenStream-based.
+                    argument_tokens.reconsume_current_input_token();
+
                     if (function_metadata.parameters[argument_index].type == TransformFunctionParameterType::LengthNone) {
-                        auto identifier_value = parse_identifier_value(value);
+                        auto ident_transaction = argument_tokens.begin_transaction();
+                        auto identifier_value = parse_identifier_value(argument_tokens);
                         if (identifier_value && identifier_value->to_identifier() == ValueID::None) {
                             values.append(identifier_value.release_nonnull());
-                            argument_index++;
-                            continue;
+                            ident_transaction.commit();
+                            break;
                         }
                     }
 
-                    auto dimension_value = parse_dimension_value(value);
-                    if (!dimension_value)
+                    auto dimension_value = parse_dimension_value(argument_tokens);
+                    if (!dimension_value || !dimension_value->is_length())
                         return nullptr;
 
-                    if (dimension_value->is_length())
-                        values.append(dimension_value.release_nonnull());
-                    else
-                        return nullptr;
+                    values.append(dimension_value.release_nonnull());
                 }
                 break;
             }
@@ -5154,7 +5255,9 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
                 if (maybe_calc_value && maybe_calc_value->resolves_to_length_percentage()) {
                     values.append(maybe_calc_value.release_nonnull());
                 } else {
-                    auto dimension_value = parse_dimension_value(value);
+                    // FIXME: Remove this reconsume once all parsing functions are TokenStream-based.
+                    argument_tokens.reconsume_current_input_token();
+                    auto dimension_value = parse_dimension_value(argument_tokens);
                     if (!dimension_value)
                         return nullptr;
 
@@ -5194,23 +5297,8 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
             }
 
             argument_tokens.skip_whitespace();
-            if (argument_tokens.has_next_token()) {
-                // Arguments must be separated by commas.
-                if (!argument_tokens.next_token().is(Token::Type::Comma))
-                    return nullptr;
-                argument_tokens.skip_whitespace();
-
-                // If there are no more parameters after the comma, this is invalid.
-                if (!argument_tokens.has_next_token())
-                    return nullptr;
-            }
-
-            argument_index++;
-        }
-
-        if (argument_index < function_metadata.parameters.size() && function_metadata.parameters[argument_index].required) {
-            dbgln_if(CSS_PARSER_DEBUG, "Required parameter at position {} is missing", argument_index);
-            return nullptr;
+            if (argument_tokens.has_next_token())
+                return nullptr;
         }
 
         transformations.append(TransformationStyleValue::create(function, move(values)));
@@ -5331,6 +5419,82 @@ RefPtr<StyleValue> Parser::parse_transform_origin_value(TokenStream<ComponentVal
     }
 
     return nullptr;
+}
+
+RefPtr<StyleValue> Parser::parse_transition_value(TokenStream<ComponentValue>& tokens)
+{
+    if (contains_single_none_ident(tokens)) {
+        tokens.next_token(); // none
+        return IdentifierStyleValue::create(ValueID::None);
+    }
+
+    Vector<TransitionStyleValue::Transition> transitions;
+    auto transaction = tokens.begin_transaction();
+
+    while (tokens.has_next_token()) {
+        TransitionStyleValue::Transition transition;
+        auto time_value_count = 0;
+
+        while (tokens.has_next_token() && !tokens.peek_token().is(Token::Type::Comma)) {
+            if (auto time = parse_time(tokens); time.has_value()) {
+                switch (time_value_count) {
+                case 0:
+                    transition.duration = time.release_value();
+                    break;
+                case 1:
+                    transition.delay = time.release_value();
+                    break;
+                default:
+                    dbgln_if(CSS_PARSER_DEBUG, "Transition property has more than two time values");
+                    return {};
+                }
+                time_value_count++;
+                continue;
+            }
+
+            if (auto easing = parse_easing_value(tokens)) {
+                if (transition.easing) {
+                    dbgln_if(CSS_PARSER_DEBUG, "Transition property has multiple easing values");
+                    return {};
+                }
+
+                transition.easing = easing->as_easing();
+                continue;
+            }
+
+            if (tokens.peek_token().is(Token::Type::Ident)) {
+                if (transition.property_name) {
+                    dbgln_if(CSS_PARSER_DEBUG, "Transition property has multiple property identifiers");
+                    return {};
+                }
+
+                auto ident = tokens.next_token().token().ident();
+                if (auto property = property_id_from_string(ident); property.has_value())
+                    transition.property_name = CustomIdentStyleValue::create(ident);
+
+                continue;
+            }
+
+            dbgln_if(CSS_PARSER_DEBUG, "Transition property has unexpected token \"{}\"", tokens.peek_token().to_string());
+            return {};
+        }
+
+        if (!transition.property_name)
+            transition.property_name = CustomIdentStyleValue::create("all"_fly_string);
+
+        if (!transition.easing)
+            transition.easing = EasingStyleValue::create(EasingFunction::Ease, {});
+
+        transitions.append(move(transition));
+
+        if (!tokens.peek_token().is(Token::Type::Comma))
+            break;
+
+        tokens.next_token();
+    }
+
+    transaction.commit();
+    return TransitionStyleValue::create(move(transitions));
 }
 
 RefPtr<StyleValue> Parser::parse_as_css_value(PropertyID property_id)
@@ -5469,9 +5633,18 @@ Optional<CSS::GridRepeat> Parser::parse_repeat(Vector<ComponentValue> const& com
             // The repeat() notation can’t be nested.
             if (track_sizing_function.value().is_repeat())
                 return {};
+
             // Automatic repetitions (auto-fill or auto-fit) cannot be combined with intrinsic or flexible sizes.
-            if (track_sizing_function.value().is_default() && track_sizing_function.value().grid_size().is_flexible_length() && (is_auto_fill || is_auto_fit))
+            // Note that 'auto' is also an intrinsic size (and thus not permitted) but we can't use
+            // track_sizing_function.is_auto(..) to check for it, as it requires AvailableSize, which is why there is
+            // a separate check for it below.
+            // https://www.w3.org/TR/css-grid-2/#repeat-syntax
+            // https://www.w3.org/TR/css-grid-2/#intrinsic-sizing-function
+            if (track_sizing_function.value().is_default()
+                && (track_sizing_function.value().grid_size().is_flexible_length() || token.is_ident("auto"sv))
+                && (is_auto_fill || is_auto_fit))
                 return {};
+
             repeat_params.append(track_sizing_function.value());
             part_two_tokens.skip_whitespace();
         }
@@ -6252,7 +6425,11 @@ Parser::ParseErrorOr<NonnullRefPtr<StyleValue>> Parser::parse_css_value(Property
     case PropertyID::TransformOrigin:
         if (auto parsed_value = parse_transform_origin_value(tokens); parsed_value && !tokens.has_next_token())
             return parsed_value.release_nonnull();
-        return ParseError ::SyntaxError;
+        return ParseError::SyntaxError;
+    case PropertyID::Transition:
+        if (auto parsed_value = parse_transition_value(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
     default:
         break;
     }
@@ -6391,17 +6568,13 @@ Optional<Parser::PropertyAndValue> Parser::parse_css_value_for_properties(Readon
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Color); property.has_value()) {
-        if (auto maybe_color = parse_color_value(peek_token)) {
-            (void)tokens.next_token();
+        if (auto maybe_color = parse_color_value(tokens))
             return PropertyAndValue { *property, maybe_color };
-        }
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Image); property.has_value()) {
-        if (auto maybe_image = parse_image_value(peek_token)) {
-            (void)tokens.next_token();
+        if (auto maybe_image = parse_image_value(tokens))
             return PropertyAndValue { *property, maybe_image };
-        }
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Position); property.has_value()) {
@@ -6412,6 +6585,11 @@ Optional<Parser::PropertyAndValue> Parser::parse_css_value_for_properties(Readon
     if (auto property = any_property_accepts_type(property_ids, ValueType::BackgroundPosition); property.has_value()) {
         if (auto maybe_position = parse_position_value(tokens, PositionParsingMode::BackgroundPosition))
             return PropertyAndValue { *property, maybe_position };
+    }
+
+    if (auto property = any_property_accepts_type(property_ids, ValueType::BasicShape); property.has_value()) {
+        if (auto maybe_basic_shape = parse_basic_shape_value(tokens))
+            return PropertyAndValue { *property, maybe_basic_shape };
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Ratio); property.has_value()) {
@@ -6449,10 +6627,8 @@ Optional<Parser::PropertyAndValue> Parser::parse_css_value_for_properties(Readon
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Rect); property.has_value()) {
-        if (auto maybe_rect = parse_rect_value(peek_token)) {
-            (void)tokens.next_token();
+        if (auto maybe_rect = parse_rect_value(tokens))
             return PropertyAndValue { *property, maybe_rect };
-        }
     }
 
     if (peek_token.is(Token::Type::String)) {
@@ -6461,10 +6637,8 @@ Optional<Parser::PropertyAndValue> Parser::parse_css_value_for_properties(Readon
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Url); property.has_value()) {
-        if (auto url = parse_url_value(peek_token)) {
-            (void)tokens.next_token();
+        if (auto url = parse_url_value(tokens))
             return PropertyAndValue { *property, url };
-        }
     }
 
     bool property_accepts_dimension = any_property_accepts_type(property_ids, ValueType::Angle).has_value()
@@ -6919,7 +7093,7 @@ bool Parser::has_ignored_vendor_prefix(StringView string)
     return true;
 }
 
-NonnullRefPtr<StyleValue> Parser::resolve_unresolved_style_value(Badge<StyleComputer>, ParsingContext const& context, DOM::Element& element, Optional<Selector::PseudoElement::Type> pseudo_element, PropertyID property_id, UnresolvedStyleValue const& unresolved)
+NonnullRefPtr<StyleValue> Parser::resolve_unresolved_style_value(ParsingContext const& context, DOM::Element& element, Optional<Selector::PseudoElement::Type> pseudo_element, PropertyID property_id, UnresolvedStyleValue const& unresolved)
 {
     // Unresolved always contains a var() or attr(), unless it is a custom property's value, in which case we shouldn't be trying
     // to produce a different StyleValue from it.
@@ -6933,7 +7107,7 @@ NonnullRefPtr<StyleValue> Parser::resolve_unresolved_style_value(Badge<StyleComp
 
 class PropertyDependencyNode : public RefCounted<PropertyDependencyNode> {
 public:
-    static NonnullRefPtr<PropertyDependencyNode> create(String name)
+    static NonnullRefPtr<PropertyDependencyNode> create(FlyString name)
     {
         return adopt_ref(*new PropertyDependencyNode(move(name)));
     }
@@ -6964,12 +7138,12 @@ public:
     }
 
 private:
-    explicit PropertyDependencyNode(String name)
+    explicit PropertyDependencyNode(FlyString name)
         : m_name(move(name))
     {
     }
 
-    String m_name;
+    FlyString m_name;
     Vector<NonnullRefPtr<PropertyDependencyNode>> m_children;
     bool m_marked { false };
 };
@@ -6998,18 +7172,18 @@ NonnullRefPtr<StyleValue> Parser::resolve_unresolved_style_value(DOM::Element& e
 static RefPtr<StyleValue const> get_custom_property(DOM::Element const& element, Optional<CSS::Selector::PseudoElement::Type> pseudo_element, FlyString const& custom_property_name)
 {
     if (pseudo_element.has_value()) {
-        if (auto it = element.custom_properties(pseudo_element).find(custom_property_name.to_string()); it != element.custom_properties(pseudo_element).end())
+        if (auto it = element.custom_properties(pseudo_element).find(custom_property_name); it != element.custom_properties(pseudo_element).end())
             return it->value.value;
     }
 
     for (auto const* current_element = &element; current_element; current_element = current_element->parent_element()) {
-        if (auto it = current_element->custom_properties({}).find(custom_property_name.to_string()); it != current_element->custom_properties({}).end())
+        if (auto it = current_element->custom_properties({}).find(custom_property_name); it != current_element->custom_properties({}).end())
             return it->value.value;
     }
     return nullptr;
 }
 
-bool Parser::expand_variables(DOM::Element& element, Optional<Selector::PseudoElement::Type> pseudo_element, StringView property_name, HashMap<FlyString, NonnullRefPtr<PropertyDependencyNode>>& dependencies, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest)
+bool Parser::expand_variables(DOM::Element& element, Optional<Selector::PseudoElement::Type> pseudo_element, FlyString const& property_name, HashMap<FlyString, NonnullRefPtr<PropertyDependencyNode>>& dependencies, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest)
 {
     // Arbitrary large value chosen to avoid the billion-laughs attack.
     // https://www.w3.org/TR/css-variables-1/#long-variables
@@ -7019,10 +7193,10 @@ bool Parser::expand_variables(DOM::Element& element, Optional<Selector::PseudoEl
         return false;
     }
 
-    auto get_dependency_node = [&](FlyString name) -> NonnullRefPtr<PropertyDependencyNode> {
+    auto get_dependency_node = [&](FlyString const& name) -> NonnullRefPtr<PropertyDependencyNode> {
         if (auto existing = dependencies.get(name); existing.has_value())
             return *existing.value();
-        auto new_node = PropertyDependencyNode::create(name.to_string());
+        auto new_node = PropertyDependencyNode::create(name);
         dependencies.set(name, new_node);
         return new_node;
     };
@@ -7071,7 +7245,7 @@ bool Parser::expand_variables(DOM::Element& element, Optional<Selector::PseudoEl
         // but rebuilding it every time.
         if (custom_property_name == property_name)
             return false;
-        auto parent = get_dependency_node(MUST(FlyString::from_utf8(property_name)));
+        auto parent = get_dependency_node(property_name);
         auto child = get_dependency_node(custom_property_name);
         parent->add_child(child);
         if (parent->has_cycles())
@@ -7099,7 +7273,7 @@ bool Parser::expand_variables(DOM::Element& element, Optional<Selector::PseudoEl
     return true;
 }
 
-bool Parser::expand_unresolved_values(DOM::Element& element, StringView property_name, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest)
+bool Parser::expand_unresolved_values(DOM::Element& element, FlyString const& property_name, TokenStream<ComponentValue>& source, Vector<ComponentValue>& dest)
 {
     while (source.has_next_token()) {
         auto const& value = source.next_token();
@@ -7170,7 +7344,7 @@ bool Parser::expand_unresolved_values(DOM::Element& element, StringView property
 }
 
 // https://drafts.csswg.org/css-values-5/#attr-substitution
-bool Parser::substitute_attr_function(DOM::Element& element, StringView property_name, Function const& attr_function, Vector<ComponentValue>& dest)
+bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& property_name, Function const& attr_function, Vector<ComponentValue>& dest)
 {
     // First, parse the arguments to attr():
     // attr() = attr( <q-name> <attr-type>? , <declaration-value>?)
@@ -7357,6 +7531,12 @@ bool Parser::substitute_attr_function(DOM::Element& element, StringView property
     //    If there are any var() or attr() references in the fallback, substitute them as well.
     if (has_fallback_values)
         return expand_unresolved_values(element, property_name, attr_contents, dest);
+
+    if (attribute_type.equals_ignoring_ascii_case("string"_fly_string)) {
+        // If the <attr-type> argument is string, defaults to the empty string if omitted
+        dest.empend(Token::create_string({}));
+        return true;
+    }
 
     // 3. Otherwise, the property containing the attr() function is invalid at computed-value time.
     return false;

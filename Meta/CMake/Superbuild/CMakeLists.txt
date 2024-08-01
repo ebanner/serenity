@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 
 project(
     SerenitySuperbuild
@@ -7,26 +7,8 @@ project(
 )
 
 # NOTE: Before CMake 3.19, if a custom command is attached to multiple step targets for Makefile and Visual Studio generators,
-#       it might be run multiple times during the build. Enable new behavior of policy CMP0114 to avoid this, or apply the
-#       workaround from https://gitlab.kitware.com/cmake/cmake/-/issues/18663#note_489967
-if(NOT CMAKE_VERSION VERSION_LESS "3.19")
-  cmake_policy(SET CMP0114 NEW)
-  macro(ensure_dependencies)
-  endmacro()
-else()
-  macro(ensure_dependencies proj)
-    foreach(step IN ITEMS configure build install)
-      if(NOT TARGET "${proj}-${step}")
-        ExternalProject_Add_StepTargets("${proj}" "${step}")
-      endif()
-      if(step STREQUAL "install")
-        ExternalProject_Add_StepDependencies("${proj}" install "${proj}-build")
-      elseif(step STREQUAL "build")
-        ExternalProject_Add_StepDependencies("${proj}" build "${proj}-configure")
-      endif()
-    endforeach()
-  endmacro()
-endif()
+#       it might be run multiple times during the build. Enable new behavior of policy CMP0114 to avoid this.
+cmake_policy(SET CMP0114 NEW)
 
 get_filename_component(
     SERENITY_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../../.."
@@ -106,8 +88,6 @@ ExternalProject_Add(
     ${console_access}
 )
 
-ensure_dependencies(lagom)
-
 # Collect options for serenity build
 set(serenity_options "")
 macro(serenity_option name)
@@ -135,5 +115,3 @@ ExternalProject_Add(
     STEP_TARGETS configure install
     ${console_access}
 )
-
-ensure_dependencies(serenity)

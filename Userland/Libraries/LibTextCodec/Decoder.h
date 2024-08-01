@@ -46,54 +46,89 @@ public:
     virtual ErrorOr<String> to_utf8(StringView) override;
 };
 
+class SingleByteDecoder final : public Decoder {
+public:
+    SingleByteDecoder(Array<u32, 128> translation_table)
+        : m_translation_table(translation_table)
+    {
+    }
+
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+
+private:
+    Array<u32, 128> m_translation_table;
+};
+
 class Latin1Decoder final : public Decoder {
 public:
     virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView) override { return true; }
 };
 
 class Latin2Decoder final : public Decoder {
 public:
     virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
-};
-
-class HebrewDecoder final : public Decoder {
-public:
-    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
-};
-
-class CyrillicDecoder final : public Decoder {
-public:
-    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
-};
-
-class Koi8RDecoder final : public Decoder {
-public:
-    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView) override { return true; }
 };
 
 class Latin9Decoder final : public Decoder {
 public:
     virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
-};
-
-class MacRomanDecoder final : public Decoder {
-public:
-    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView) override { return true; }
 };
 
 class PDFDocEncodingDecoder final : public Decoder {
 public:
     virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView) override { return true; }
 };
 
 class TurkishDecoder final : public Decoder {
 public:
     virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView) override { return true; }
 };
 
 class XUserDefinedDecoder final : public Decoder {
 public:
     virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView) override { return true; }
+};
+
+class GB18030Decoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+};
+
+class Big5Decoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+};
+
+class EUCJPDecoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+};
+
+class ISO2022JPDecoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+};
+
+class ShiftJISDecoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+};
+
+class EUCKRDecoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+};
+
+class ReplacementDecoder final : public Decoder {
+public:
+    virtual ErrorOr<void> process(StringView, Function<ErrorOr<void>(u32)> on_code_point) override;
+    virtual bool validate(StringView input) override { return input.is_empty(); }
 };
 
 Optional<Decoder&> decoder_for(StringView encoding);

@@ -7,7 +7,7 @@
  */
 
 #include <AK/Debug.h>
-#include <AK/URL.h>
+#include <LibURL/URL.h>
 #include <LibWeb/Bindings/CSSImportRulePrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSImportRule.h>
@@ -21,13 +21,13 @@ namespace Web::CSS {
 
 JS_DEFINE_ALLOCATOR(CSSImportRule);
 
-JS::NonnullGCPtr<CSSImportRule> CSSImportRule::create(AK::URL url, DOM::Document& document)
+JS::NonnullGCPtr<CSSImportRule> CSSImportRule::create(URL::URL url, DOM::Document& document)
 {
     auto& realm = document.realm();
     return realm.heap().allocate<CSSImportRule>(realm, move(url), document);
 }
 
-CSSImportRule::CSSImportRule(AK::URL url, DOM::Document& document)
+CSSImportRule::CSSImportRule(URL::URL url, DOM::Document& document)
     : CSSRule(document.realm())
     , m_url(move(url))
     , m_document(document)
@@ -45,7 +45,7 @@ CSSImportRule::CSSImportRule(AK::URL url, DOM::Document& document)
 void CSSImportRule::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CSSImportRulePrototype>(realm, "CSSImportRule"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(CSSImportRule);
 }
 
 void CSSImportRule::visit_edges(Cell::Visitor& visitor)

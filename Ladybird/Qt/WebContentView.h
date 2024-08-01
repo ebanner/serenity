@@ -11,11 +11,11 @@
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/OwnPtr.h>
-#include <AK/URL.h>
 #include <Ladybird/Types.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
 #include <LibGfx/StandardCursor.h>
+#include <LibURL/URL.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/Forward.h>
@@ -24,8 +24,10 @@
 #include <QAbstractScrollArea>
 #include <QUrl>
 
-class QTextEdit;
+class QKeyEvent;
 class QLineEdit;
+class QSinglePointEvent;
+class QTextEdit;
 
 namespace WebView {
 class WebContentClient;
@@ -42,10 +44,10 @@ class WebContentView final
     , public WebView::ViewImplementation {
     Q_OBJECT
 public:
-    WebContentView(WebContentOptions const&, StringView webdriver_content_ipc_path);
+    WebContentView(QWidget* window, WebContentOptions const&, StringView webdriver_content_ipc_path, RefPtr<WebView::WebContentClient> parent_client = nullptr, size_t page_index = 0);
     virtual ~WebContentView() override;
 
-    Function<String(const AK::URL&, Web::HTML::ActivateTab)> on_tab_open_request;
+    Function<String(const URL::URL&, Web::HTML::ActivateTab)> on_tab_open_request;
 
     virtual void paintEvent(QPaintEvent*) override;
     virtual void resizeEvent(QResizeEvent*) override;
@@ -77,12 +79,16 @@ public:
     };
     void update_palette(PaletteMode = PaletteMode::Default);
 
+    using ViewImplementation::client;
+
+    QPoint map_point_to_global_position(Gfx::IntPoint) const;
+
 signals:
     void urls_dropped(QList<QUrl> const&);
 
 private:
     // ^WebView::ViewImplementation
-    virtual void create_client() override;
+    virtual void initialize_client(CreateNewClient) override;
     virtual void update_zoom() override;
     virtual Web::DevicePixelRect viewport_rect() const override;
     virtual Gfx::IntPoint to_content_position(Gfx::IntPoint widget_position) const override;
@@ -90,6 +96,11 @@ private:
 
     void update_viewport_rect();
     void update_cursor(Gfx::StandardCursor cursor);
+
+    void enqueue_native_event(Web::MouseEvent::Type, QSinglePointEvent const& event);
+    void enqueue_native_event(Web::KeyEvent::Type, QKeyEvent const& event);
+    void finish_handling_key_event(Web::KeyEvent const&);
+    void update_screen_rects();
 
     bool m_should_show_line_box_borders { false };
 

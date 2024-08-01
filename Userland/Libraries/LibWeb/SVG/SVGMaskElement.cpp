@@ -7,7 +7,6 @@
 
 #include <LibWeb/Bindings/SVGMaskElementPrototype.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/Layout/SVGGraphicsBox.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/SVGMaskElement.h>
 
@@ -25,12 +24,13 @@ SVGMaskElement::~SVGMaskElement() = default;
 void SVGMaskElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SVGMaskElementPrototype>(realm, "SVGMaskElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGMaskElement);
 }
 
-JS::GCPtr<Layout::Node> SVGMaskElement::create_layout_node(NonnullRefPtr<CSS::StyleProperties> style)
+JS::GCPtr<Layout::Node> SVGMaskElement::create_layout_node(NonnullRefPtr<CSS::StyleProperties>)
 {
-    return heap().allocate_without_realm<Layout::SVGGraphicsBox>(document(), *this, move(style));
+    // Masks are handled as a special case in the TreeBuilder.
+    return nullptr;
 }
 
 void SVGMaskElement::attribute_changed(FlyString const& name, Optional<String> const& value)

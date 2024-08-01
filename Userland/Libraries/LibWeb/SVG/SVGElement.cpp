@@ -7,6 +7,8 @@
 
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/SVGElementPrototype.h>
+#include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/HTML/DOMStringMap.h>
@@ -23,15 +25,20 @@ SVGElement::SVGElement(DOM::Document& document, DOM::QualifiedName qualified_nam
 void SVGElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SVGElementPrototype>(realm, "SVGElement"_fly_string));
-
-    m_dataset = HTML::DOMStringMap::create(*this);
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGElement);
 }
 
 void SVGElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_dataset);
+}
+
+JS::NonnullGCPtr<HTML::DOMStringMap> SVGElement::dataset()
+{
+    if (!m_dataset)
+        m_dataset = HTML::DOMStringMap::create(*this);
+    return *m_dataset;
 }
 
 void SVGElement::attribute_changed(FlyString const& name, Optional<String> const& value)
@@ -74,7 +81,7 @@ void SVGElement::update_use_elements_that_reference_this()
 
     document().for_each_in_subtree_of_type<SVGUseElement>([this](SVGUseElement& use_element) {
         use_element.svg_element_changed(*this);
-        return IterationDecision::Continue;
+        return TraversalDecision::Continue;
     });
 }
 
@@ -93,7 +100,7 @@ void SVGElement::remove_from_use_element_that_reference_this()
 
     document().for_each_in_subtree_of_type<SVGUseElement>([this](SVGUseElement& use_element) {
         use_element.svg_element_removed(*this);
-        return IterationDecision::Continue;
+        return TraversalDecision::Continue;
     });
 }
 
@@ -105,6 +112,19 @@ void SVGElement::focus()
 void SVGElement::blur()
 {
     dbgln("(STUBBED) SVGElement::blur()");
+}
+
+JS::NonnullGCPtr<SVGAnimatedLength> SVGElement::svg_animated_length_for_property(CSS::PropertyID property) const
+{
+    // FIXME: Create a proper animated value when animations are supported.
+    auto make_length = [&] {
+        if (auto const* style = computed_css_values(); style) {
+            if (auto length = style->length_percentage(property); length.has_value())
+                return SVGLength::from_length_percentage(realm(), *length);
+        }
+        return SVGLength::create(realm(), 0, 0.0f);
+    };
+    return SVGAnimatedLength::create(realm(), make_length(), make_length());
 }
 
 }

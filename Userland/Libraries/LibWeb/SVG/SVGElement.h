@@ -23,8 +23,7 @@ public:
     virtual void inserted() override;
     virtual void removed_from(Node*) override;
 
-    HTML::DOMStringMap* dataset() { return m_dataset.ptr(); }
-    HTML::DOMStringMap const* dataset() const { return m_dataset.ptr(); }
+    [[nodiscard]] JS::NonnullGCPtr<HTML::DOMStringMap> dataset();
 
     void focus();
     void blur();
@@ -39,6 +38,8 @@ protected:
     void remove_from_use_element_that_reference_this();
 
     JS::GCPtr<HTML::DOMStringMap> m_dataset;
+
+    JS::NonnullGCPtr<SVGAnimatedLength> svg_animated_length_for_property(CSS::PropertyID) const;
 
 private:
     virtual bool is_svg_element() const final { return true; }

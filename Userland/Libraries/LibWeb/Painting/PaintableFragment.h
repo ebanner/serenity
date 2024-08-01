@@ -14,12 +14,13 @@
 namespace Web::Painting {
 
 class PaintableFragment {
-    friend struct Layout::LayoutState;
+    friend class ViewportPaintable;
 
 public:
     explicit PaintableFragment(Layout::LineBoxFragment const&);
 
     Layout::Node const& layout_node() const { return m_layout_node; }
+    Paintable const& paintable() const { return *m_layout_node->paintable(); }
 
     int start() const { return m_start; }
     int length() const { return m_length; }
@@ -37,17 +38,16 @@ public:
 
     CSSPixelRect const absolute_rect() const;
 
-    Vector<Gfx::DrawGlyphOrEmoji> const& glyph_run() const { return m_glyph_run; }
+    Gfx::GlyphRun const& glyph_run() const { return *m_glyph_run; }
 
     CSSPixelRect selection_rect(Gfx::Font const&) const;
-
-    bool contained_by_inline_node() const { return m_contained_by_inline_node; }
-    void set_contained_by_inline_node() { m_contained_by_inline_node = true; }
 
     CSSPixels width() const { return m_size.width(); }
     CSSPixels height() const { return m_size.height(); }
 
     int text_index_at(CSSPixels) const;
+
+    StringView string_view() const;
 
 private:
     JS::NonnullGCPtr<Layout::Node const> m_layout_node;
@@ -57,9 +57,8 @@ private:
     int m_start;
     int m_length;
     Painting::BorderRadiiData m_border_radii_data;
-    Vector<Gfx::DrawGlyphOrEmoji> m_glyph_run;
+    NonnullRefPtr<Gfx::GlyphRun> m_glyph_run;
     Vector<ShadowData> m_shadows;
-    bool m_contained_by_inline_node { false };
 };
 
 }

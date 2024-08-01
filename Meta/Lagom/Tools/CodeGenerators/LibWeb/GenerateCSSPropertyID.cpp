@@ -17,11 +17,12 @@ void replace_logical_aliases(JsonObject& properties);
 ErrorOr<void> generate_header_file(JsonObject& properties, Core::File& file);
 ErrorOr<void> generate_implementation_file(JsonObject& properties, Core::File& file);
 void generate_bounds_checking_function(JsonObject& properties, SourceGenerator& parent_generator, StringView css_type_name, StringView type_name, Optional<StringView> default_unit_name = {}, Optional<StringView> value_getter = {});
+bool is_animatable_property(JsonObject& properties, StringView property_name);
 
 static bool type_name_is_enum(StringView type_name)
 {
     return !AK::first_is_one_of(type_name,
-        "angle"sv, "background-position"sv, "color"sv, "custom-ident"sv, "easing-function"sv, "flex"sv, "frequency"sv, "image"sv,
+        "angle"sv, "background-position"sv, "basic-shape"sv, "color"sv, "custom-ident"sv, "easing-function"sv, "flex"sv, "frequency"sv, "image"sv,
         "integer"sv, "length"sv, "number"sv, "paint"sv, "percentage"sv, "position"sv, "ratio"sv, "rect"sv,
         "resolution"sv, "string"sv, "time"sv, "url"sv);
 }
@@ -68,8 +69,8 @@ void replace_logical_aliases(JsonObject& properties)
     AK::HashMap<ByteString, ByteString> logical_aliases;
     properties.for_each_member([&](auto& name, auto& value) {
         VERIFY(value.is_object());
-        const auto& value_as_object = value.as_object();
-        const auto logical_alias_for = value_as_object.get_array("logical-alias-for"sv);
+        auto const& value_as_object = value.as_object();
+        auto const logical_alias_for = value_as_object.get_array("logical-alias-for"sv);
         if (logical_alias_for.has_value()) {
             auto const& aliased_properties = logical_alias_for.value();
             for (auto const& aliased_property : aliased_properties.values()) {
@@ -160,15 +161,27 @@ enum class PropertyID {
     generator.append(R"~~~(
 };
 
+enum class AnimationType {
+    Discrete,
+    ByComputedValue,
+    RepeatableList,
+    Custom,
+    None,
+};
+AnimationType animation_type_from_longhand_property(PropertyID);
+bool is_animatable_property(PropertyID);
+
 Optional<PropertyID> property_id_from_camel_case_string(StringView);
 Optional<PropertyID> property_id_from_string(StringView);
-StringView string_from_property_id(PropertyID);
+[[nodiscard]] FlyString const& string_from_property_id(PropertyID);
+[[nodiscard]] FlyString const& camel_case_string_from_property_id(PropertyID);
 bool is_inherited_property(PropertyID);
 NonnullRefPtr<StyleValue> property_initial_value(JS::Realm&, PropertyID);
 
 enum class ValueType {
     Angle,
     BackgroundPosition,
+    BasicShape,
     Color,
     CustomIdent,
     EasingFunction,
@@ -390,7 +403,7 @@ Optional<PropertyID> property_id_from_string(StringView string)
     return {};
 }
 
-StringView string_from_property_id(PropertyID property_id) {
+FlyString const& string_from_property_id(PropertyID property_id) {
     switch (property_id) {
 )~~~");
 
@@ -401,14 +414,110 @@ StringView string_from_property_id(PropertyID property_id) {
         member_generator.set("name", name);
         member_generator.set("name:titlecase", title_casify(name));
         member_generator.append(R"~~~(
+    case PropertyID::@name:titlecase@: {
+        static FlyString name = "@name@"_fly_string;
+        return name;
+    }
+)~~~");
+    });
+
+    generator.append(R"~~~(
+    default: {
+        static FlyString invalid_property_id_string = "(invalid CSS::PropertyID)"_fly_string;
+        return invalid_property_id_string;
+    }
+    }
+}
+
+FlyString const& camel_case_string_from_property_id(PropertyID property_id) {
+    switch (property_id) {
+)~~~");
+
+    properties.for_each_member([&](auto& name, auto& value) {
+        VERIFY(value.is_object());
+
+        auto member_generator = generator.fork();
+        member_generator.set("name", name);
+        member_generator.set("name:titlecase", title_casify(name));
+        member_generator.set("name:camelcase", camel_casify(name));
+        member_generator.append(R"~~~(
+    case PropertyID::@name:titlecase@: {
+        static FlyString name = "@name:camelcase@"_fly_string;
+        return name;
+    }
+)~~~");
+    });
+
+    generator.append(R"~~~(
+    default: {
+        static FlyString invalid_property_id_string = "(invalid CSS::PropertyID)"_fly_string;
+        return invalid_property_id_string;
+    }
+    }
+}
+
+AnimationType animation_type_from_longhand_property(PropertyID property_id)
+{
+    switch (property_id) {
+)~~~");
+
+    properties.for_each_member([&](auto& name, auto& value) {
+        VERIFY(value.is_object());
+        auto member_generator = generator.fork();
+        member_generator.set("name:titlecase", title_casify(name));
+
+        // Shorthand properties should have already been expanded before calling into this function
+        if (value.as_object().has("longhands"sv)) {
+            if (value.as_object().has("animation-type"sv)) {
+                dbgln("Property '{}' with longhands cannot specify 'animation-type'", name);
+                VERIFY_NOT_REACHED();
+            }
+            member_generator.append(R"~~~(
     case PropertyID::@name:titlecase@:
-        return "@name@"sv;
+        VERIFY_NOT_REACHED();
+)~~~");
+            return;
+        }
+
+        if (!value.as_object().has("animation-type"sv)) {
+            dbgln("No animation-type specified for property '{}'", name);
+            VERIFY_NOT_REACHED();
+        }
+
+        auto animation_type = value.as_object().get_byte_string("animation-type"sv).value();
+        member_generator.set("value", title_casify(animation_type));
+        member_generator.append(R"~~~(
+    case PropertyID::@name:titlecase@:
+        return AnimationType::@value@;
 )~~~");
     });
 
     generator.append(R"~~~(
     default:
-        return "(invalid CSS::PropertyID)"sv;
+        return AnimationType::None;
+    }
+}
+
+bool is_animatable_property(PropertyID property_id)
+{
+    switch (property_id) {
+)~~~");
+
+    properties.for_each_member([&](auto& name, auto& value) {
+        VERIFY(value.is_object());
+        if (is_animatable_property(properties, name)) {
+            auto member_generator = generator.fork();
+            member_generator.set("name:titlecase", title_casify(name));
+            member_generator.append(R"~~~(
+    case PropertyID::@name:titlecase@:
+)~~~");
+        }
+    });
+
+    generator.append(R"~~~(
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -619,6 +728,8 @@ bool property_accepts_type(PropertyID property_id, ValueType value_type)
                     property_generator.appendln("        case ValueType::Angle:");
                 } else if (type_name == "background-position") {
                     property_generator.appendln("        case ValueType::BackgroundPosition:");
+                } else if (type_name == "basic-shape") {
+                    property_generator.appendln("        case ValueType::BasicShape:");
                 } else if (type_name == "color") {
                     property_generator.appendln("        case ValueType::Color:");
                 } else if (type_name == "custom-ident") {
@@ -859,4 +970,29 @@ Vector<PropertyID> longhands_for_shorthand(PropertyID property_id)
 
     TRY(file.write_until_depleted(generator.as_string_view().bytes()));
     return {};
+}
+
+bool is_animatable_property(JsonObject& properties, StringView property_name)
+{
+    auto property = properties.get_object(property_name);
+    VERIFY(property.has_value());
+
+    if (auto animation_type = property.value().get_byte_string("animation-type"sv); animation_type.has_value()) {
+        return animation_type != "none";
+    }
+
+    if (!property.value().has("longhands"sv)) {
+        dbgln("Property '{}' must specify either 'animation-type' or 'longhands'"sv, property_name);
+        VERIFY_NOT_REACHED();
+    }
+
+    auto longhands = property.value().get_array("longhands"sv);
+    VERIFY(longhands.has_value());
+    for (auto const& subproperty_name : longhands->values()) {
+        VERIFY(subproperty_name.is_string());
+        if (is_animatable_property(properties, subproperty_name.as_string()))
+            return true;
+    }
+
+    return false;
 }

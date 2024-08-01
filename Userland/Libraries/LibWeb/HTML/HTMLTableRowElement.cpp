@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLTableRowElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/Parser/ParsingContext.h>
@@ -35,7 +36,7 @@ HTMLTableRowElement::~HTMLTableRowElement() = default;
 void HTMLTableRowElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLTableRowElementPrototype>(realm, "HTMLTableRowElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLTableRowElement);
 }
 
 void HTMLTableRowElement::apply_presentational_hints(CSS::StyleProperties& style) const

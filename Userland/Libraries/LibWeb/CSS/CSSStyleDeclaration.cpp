@@ -28,7 +28,7 @@ CSSStyleDeclaration::CSSStyleDeclaration(JS::Realm& realm)
 void CSSStyleDeclaration::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CSSStyleDeclarationPrototype>(realm, "CSSStyleDeclaration"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(CSSStyleDeclaration);
 }
 
 JS::NonnullGCPtr<PropertyOwningCSSStyleDeclaration> PropertyOwningCSSStyleDeclaration::create(JS::Realm& realm, Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties)
@@ -56,7 +56,7 @@ String PropertyOwningCSSStyleDeclaration::item(size_t index) const
 {
     if (index >= m_properties.size())
         return {};
-    return MUST(String::from_utf8(CSS::string_from_property_id(m_properties[index].property_id)));
+    return CSS::string_from_property_id(m_properties[index].property_id).to_string();
 }
 
 JS::NonnullGCPtr<ElementInlineCSSStyleDeclaration> ElementInlineCSSStyleDeclaration::create(DOM::Element& element, Vector<StyleProperty> properties, HashMap<FlyString, StyleProperty> custom_properties)
@@ -409,15 +409,15 @@ JS::ThrowCompletionOr<bool> CSSStyleDeclaration::internal_has_property(JS::Prope
     return property_id_from_name(name.to_string()) != CSS::PropertyID::Invalid;
 }
 
-JS::ThrowCompletionOr<JS::Value> CSSStyleDeclaration::internal_get(JS::PropertyKey const& name, JS::Value receiver, JS::CacheablePropertyMetadata* cacheable_metadata) const
+JS::ThrowCompletionOr<JS::Value> CSSStyleDeclaration::internal_get(JS::PropertyKey const& name, JS::Value receiver, JS::CacheablePropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const
 {
     if (name.is_number())
         return { JS::PrimitiveString::create(vm(), item(name.as_number())) };
     if (!name.is_string())
-        return Base::internal_get(name, receiver, cacheable_metadata);
+        return Base::internal_get(name, receiver, cacheable_metadata, phase);
     auto property_id = property_id_from_name(name.to_string());
     if (property_id == CSS::PropertyID::Invalid)
-        return Base::internal_get(name, receiver, cacheable_metadata);
+        return Base::internal_get(name, receiver, cacheable_metadata, phase);
     if (auto maybe_property = property(property_id); maybe_property.has_value())
         return { JS::PrimitiveString::create(vm(), maybe_property->value->to_string()) };
     return { JS::PrimitiveString::create(vm(), String {}) };

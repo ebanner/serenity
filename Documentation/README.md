@@ -25,7 +25,6 @@ Make sure to read the basic [Build Instructions](BuildInstructions.md) first.
 * [Bare Metal Installation](BareMetalInstallation.md)
 * [Running On Raspberry Pi](RunningOnRaspberryPi.md)
 * [Known Hardware Compatibility](HardwareCompatibility.md)
-* [Network Booting](NetworkBoot.md)
 
 ## Configuring Editors
 * [CLion](CLionConfiguration.md)
@@ -41,6 +40,7 @@ Make sure to read the basic [Build Instructions](BuildInstructions.md) first.
 * [Coding Style](CodingStyle.md)
 * [Common Patterns](Patterns.md)
 * [Guidelines for Text in UI](HumanInterfaceGuidelines/Text.md)
+* [Guidelines for writing manual pages](WritingManPages.md)
 * [EventLoop](EventLoop.md)
 * [High DPI Support](HighDPI.md)
 * [Smart Pointers](SmartPointers.md)

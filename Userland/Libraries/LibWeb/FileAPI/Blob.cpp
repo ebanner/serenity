@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, Kenneth Myhra <kennethmyhra@serenityos.org>
+ * Copyright (c) 2022-2024, Kenneth Myhra <kennethmyhra@serenityos.org>
  * Copyright (c) 2023, Shannon Booth <shannon@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -15,6 +15,7 @@
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
+#include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Streams/AbstractOperations.h>
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
@@ -145,7 +146,39 @@ Blob::~Blob() = default;
 void Blob::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::BlobPrototype>(realm, "Blob"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Blob);
+}
+
+WebIDL::ExceptionOr<void> Blob::serialization_steps(HTML::SerializationRecord& record, bool, HTML::SerializationMemory&)
+{
+    auto& vm = this->vm();
+
+    //  FIXME: 1. Set serialized.[[SnapshotState]] to value’s snapshot state.
+
+    // NON-STANDARD: FileAPI spec doesn't specify that type should be serialized, although
+    //               to be conformant with other browsers this needs to be serialized.
+    TRY(HTML::serialize_string(vm, record, m_type));
+
+    // 2. Set serialized.[[ByteSequence]] to value’s underlying byte sequence.
+    TRY(HTML::serialize_bytes(vm, record, m_byte_buffer.bytes()));
+
+    return {};
+}
+
+WebIDL::ExceptionOr<void> Blob::deserialization_steps(ReadonlySpan<u32> const& record, size_t& position, HTML::DeserializationMemory&)
+{
+    auto& vm = this->vm();
+
+    // FIXME: 1. Set value’s snapshot state to serialized.[[SnapshotState]].
+
+    // NON-STANDARD: FileAPI spec doesn't specify that type should be deserialized, although
+    //               to be conformant with other browsers this needs to be deserialized.
+    m_type = TRY(HTML::deserialize_string(vm, record, position));
+
+    // 2. Set value’s underlying byte sequence to serialized.[[ByteSequence]].
+    m_byte_buffer = TRY(HTML::deserialize_bytes(vm, record, position));
+
+    return {};
 }
 
 // https://w3c.github.io/FileAPI/#ref-for-dom-blob-blob
@@ -255,14 +288,14 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Blob>> Blob::slice(Optional<i64> start, Opt
 }
 
 // https://w3c.github.io/FileAPI/#dom-blob-stream
-WebIDL::ExceptionOr<JS::NonnullGCPtr<Streams::ReadableStream>> Blob::stream()
+JS::NonnullGCPtr<Streams::ReadableStream> Blob::stream()
 {
     // The stream() method, when invoked, must return the result of calling get stream on this.
-    return this->get_stream();
+    return get_stream();
 }
 
 // https://w3c.github.io/FileAPI/#blob-get-stream
-WebIDL::ExceptionOr<JS::NonnullGCPtr<Streams::ReadableStream>> Blob::get_stream()
+JS::NonnullGCPtr<Streams::ReadableStream> Blob::get_stream()
 {
     auto& realm = this->realm();
 
@@ -270,7 +303,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Streams::ReadableStream>> Blob::get_stream(
     auto stream = realm.heap().allocate<Streams::ReadableStream>(realm, realm);
 
     // 2. Set up stream with byte reading support.
-    TRY(set_up_readable_stream_controller_with_byte_reading_support(stream));
+    set_up_readable_stream_controller_with_byte_reading_support(stream);
 
     // FIXME: 3. Run the following steps in parallel:
     {
@@ -281,7 +314,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Streams::ReadableStream>> Blob::get_stream(
             auto bytes = m_byte_buffer;
 
             // 2. Queue a global task on the file reading task source given blob’s relevant global object to perform the following steps:
-            HTML::queue_global_task(HTML::Task::Source::FileReading, realm.global_object(), [stream, bytes = move(bytes)]() {
+            HTML::queue_global_task(HTML::Task::Source::FileReading, realm.global_object(), JS::create_heap_function(heap(), [stream, bytes = move(bytes)]() {
                 // NOTE: Using an TemporaryExecutionContext here results in a crash in the method HTML::incumbent_settings_object()
                 //       since we end up in a state where we have no execution context + an event loop with an empty incumbent
                 //       settings object stack. We still need an execution context therefore we push the realm's execution context
@@ -315,7 +348,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Streams::ReadableStream>> Blob::get_stream(
                 //        Nowhere in the spec seems to mention this - but testing against other implementations the stream does appear to be closed after reading all data (closed callback is fired).
                 //        Probably there is a better way of doing this.
                 readable_stream_close(*stream);
-            });
+            }));
         }
     }
 
@@ -324,28 +357,25 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Streams::ReadableStream>> Blob::get_stream(
 }
 
 // https://w3c.github.io/FileAPI/#dom-blob-text
-WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> Blob::text()
+JS::NonnullGCPtr<JS::Promise> Blob::text()
 {
     auto& realm = this->realm();
     auto& vm = realm.vm();
 
     // 1. Let stream be the result of calling get stream on this.
-    auto stream = TRY(this->get_stream());
+    auto stream = get_stream();
 
     // 2. Let reader be the result of getting a reader from stream. If that threw an exception, return a new promise rejected with that exception.
     auto reader_or_exception = acquire_readable_stream_default_reader(*stream);
-    if (reader_or_exception.is_exception()) {
-        auto throw_completion = Bindings::dom_exception_to_throw_completion(vm, reader_or_exception.exception());
-        auto promise_capability = WebIDL::create_rejected_promise(realm, *throw_completion.value());
-        return JS::NonnullGCPtr { verify_cast<JS::Promise>(*promise_capability->promise().ptr()) };
-    }
+    if (reader_or_exception.is_exception())
+        return WebIDL::create_rejected_promise_from_exception(realm, reader_or_exception.release_error());
     auto reader = reader_or_exception.release_value();
 
     // 3. Let promise be the result of reading all bytes from stream with reader
-    auto promise = TRY(reader->read_all_bytes_deprecated());
+    auto promise = reader->read_all_bytes_deprecated();
 
     // 4. Return the result of transforming promise by a fulfillment handler that returns the result of running UTF-8 decode on its first argument.
-    return WebIDL::upon_fulfillment(*promise, [&](auto const& first_argument) -> WebIDL::ExceptionOr<JS::Value> {
+    return WebIDL::upon_fulfillment(*promise, JS::create_heap_function(heap(), [&vm](JS::Value first_argument) -> WebIDL::ExceptionOr<JS::Value> {
         auto const& object = first_argument.as_object();
         VERIFY(is<JS::ArrayBuffer>(object));
         auto const& buffer = static_cast<const JS::ArrayBuffer&>(object).buffer();
@@ -353,38 +383,34 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> Blob::text()
         auto decoder = TextCodec::decoder_for("UTF-8"sv);
         auto utf8_text = TRY_OR_THROW_OOM(vm, TextCodec::convert_input_to_utf8_using_given_decoder_unless_there_is_a_byte_order_mark(*decoder, buffer));
         return JS::PrimitiveString::create(vm, move(utf8_text));
-    });
+    }));
 }
 
 // https://w3c.github.io/FileAPI/#dom-blob-arraybuffer
-WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> Blob::array_buffer()
+JS::NonnullGCPtr<JS::Promise> Blob::array_buffer()
 {
     auto& realm = this->realm();
-    auto& vm = realm.vm();
 
     // 1. Let stream be the result of calling get stream on this.
-    auto stream = TRY(this->get_stream());
+    auto stream = get_stream();
 
     // 2. Let reader be the result of getting a reader from stream. If that threw an exception, return a new promise rejected with that exception.
     auto reader_or_exception = acquire_readable_stream_default_reader(*stream);
-    if (reader_or_exception.is_exception()) {
-        auto throw_completion = Bindings::dom_exception_to_throw_completion(vm, reader_or_exception.exception());
-        auto promise_capability = WebIDL::create_rejected_promise(realm, *throw_completion.value());
-        return JS::NonnullGCPtr { verify_cast<JS::Promise>(*promise_capability->promise().ptr()) };
-    }
+    if (reader_or_exception.is_exception())
+        return WebIDL::create_rejected_promise_from_exception(realm, reader_or_exception.release_error());
     auto reader = reader_or_exception.release_value();
 
     // 3. Let promise be the result of reading all bytes from stream with reader.
-    auto promise = TRY(reader->read_all_bytes_deprecated());
+    auto promise = reader->read_all_bytes_deprecated();
 
     // 4. Return the result of transforming promise by a fulfillment handler that returns a new ArrayBuffer whose contents are its first argument.
-    return WebIDL::upon_fulfillment(*promise, [&](auto const& first_argument) -> WebIDL::ExceptionOr<JS::Value> {
+    return WebIDL::upon_fulfillment(*promise, JS::create_heap_function(heap(), [&realm](JS::Value first_argument) -> WebIDL::ExceptionOr<JS::Value> {
         auto const& object = first_argument.as_object();
         VERIFY(is<JS::ArrayBuffer>(object));
         auto const& buffer = static_cast<const JS::ArrayBuffer&>(object).buffer();
 
         return JS::ArrayBuffer::create(realm, buffer);
-    });
+    }));
 }
 
 }

@@ -24,16 +24,7 @@
 
 namespace VideoPlayer {
 
-ErrorOr<NonnullRefPtr<VideoPlayerWidget>> VideoPlayerWidget::create()
-{
-    auto main_widget = TRY(try_create());
-
-    TRY(main_widget->setup_interface());
-
-    return main_widget;
-}
-
-ErrorOr<void> VideoPlayerWidget::setup_interface()
+ErrorOr<void> VideoPlayerWidget::initialize()
 {
     m_video_display = find_descendant_of_type_named<VideoPlayer::VideoFrameWidget>("video_frame");
     m_video_display->on_click = [&]() { toggle_pause(); };
@@ -134,7 +125,7 @@ void VideoPlayerWidget::open_file(FileSystemAccessClient::File file)
         return;
     }
 
-    m_path = file.filename();
+    m_path = MUST(String::from_byte_string(file.filename()));
     update_title();
     close_file();
 

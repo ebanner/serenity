@@ -20,9 +20,9 @@
 #include <AK/StringBuilder.h>
 #include <AK/TemporaryChange.h>
 #include <AK/Tuple.h>
-#include <AK/URL.h>
 #include <LibCore/DateTime.h>
 #include <LibCore/DirIterator.h>
+#include <LibCore/Environment.h>
 #include <LibCore/Event.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
@@ -30,6 +30,7 @@
 #include <LibCore/Timer.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibLine/Editor.h>
+#include <LibURL/URL.h>
 #include <Shell/PosixParser.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -705,7 +706,7 @@ ErrorOr<RefPtr<Job>> Shell::run_command(const AST::Command& command)
 
     // Resolve redirections.
     Vector<NonnullRefPtr<AST::Rewiring>> rewirings;
-    auto resolve_redirection = [&](auto& redirection) -> ErrorOr<void> {
+    auto resolve_redirection = [&](NonnullRefPtr<AST::Redirection> const& redirection) -> ErrorOr<void> {
         auto rewiring = TRY(redirection->apply());
 
         if (rewiring->fd_action != AST::Rewiring::Close::ImmediatelyCloseNew)
@@ -1726,13 +1727,11 @@ Vector<Line::CompletionSuggestion> Shell::complete_variable(StringView name, siz
     }
 
     // Look at the environment.
-    for (auto i = 0; environ[i]; ++i) {
-        StringView entry { environ[i], strlen(environ[i]) };
-        if (entry.starts_with(pattern)) {
-            auto parts = entry.split_view('=');
-            if (parts.is_empty() || parts.first().is_empty())
+    for (auto entry : Core::Environment::entries()) {
+        if (entry.full_entry.starts_with(pattern)) {
+            if (entry.name.is_empty())
                 continue;
-            ByteString name = parts.first();
+            auto name = entry.name.to_byte_string();
             if (suggestions.contains_slow(name))
                 continue;
             suggestions.append(move(name));
@@ -2006,9 +2005,9 @@ ErrorOr<Vector<Line::CompletionSuggestion>> Shell::complete_via_program_itself(s
         true);
 
     Vector<Line::CompletionSuggestion> suggestions;
-    auto timer = TRY(Core::Timer::create_single_shot(300, [&] {
+    auto timer = Core::Timer::create_single_shot(300, [&] {
         Core::EventLoop::current().quit(1);
-    }));
+    });
     timer->start();
 
     // Restrict the process to effectively readonly access to the FS.
@@ -2054,8 +2053,6 @@ ErrorOr<Vector<Line::CompletionSuggestion>> Shell::complete_via_program_itself(s
                     auto invariant_offset = object.get_u64("invariant_offset"sv).value_or(0);
                     if (!object.get_bool("treat_as_code"sv).value_or(false)) {
                         completion_text = do_escape(EscapeMode::Bareword, completion_text, static_offset, invariant_offset);
-                        trailing_text = escape_token(trailing_text, EscapeMode::Bareword);
-                        display_text = escape_token(display_text, EscapeMode::Bareword);
                     }
                     Line::CompletionSuggestion suggestion { move(completion_text), move(trailing_text), move(display_text) };
 

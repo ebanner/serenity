@@ -5,6 +5,7 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <LibWeb/Bindings/DOMStringMapPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
@@ -37,7 +38,7 @@ DOMStringMap::~DOMStringMap() = default;
 void DOMStringMap::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::DOMStringMapPrototype>(realm, "DOMStringMap"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(DOMStringMap);
 }
 
 void DOMStringMap::visit_edges(Cell::Visitor& visitor)

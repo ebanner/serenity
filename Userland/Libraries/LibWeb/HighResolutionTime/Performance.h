@@ -9,6 +9,7 @@
 
 #include <LibCore/ElapsedTimer.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/UserTiming/PerformanceMark.h>
 #include <LibWeb/UserTiming/PerformanceMeasure.h>
 
@@ -21,7 +22,7 @@ class Performance final : public DOM::EventTarget {
 public:
     virtual ~Performance() override;
 
-    double now() const { return static_cast<double>(m_timer.elapsed()); }
+    double now() const { return static_cast<double>(m_timer.elapsed_time().to_nanoseconds()) / 1e6; }
     double time_origin() const;
 
     JS::GCPtr<NavigationTiming::PerformanceTiming> timing();
@@ -36,7 +37,10 @@ public:
     WebIDL::ExceptionOr<Vector<JS::Handle<PerformanceTimeline::PerformanceEntry>>> get_entries_by_name(String const& name, Optional<String> type) const;
 
 private:
-    explicit Performance(HTML::Window&);
+    explicit Performance(JS::Realm&);
+
+    HTML::WindowOrWorkerGlobalScopeMixin& window_or_worker();
+    HTML::WindowOrWorkerGlobalScopeMixin const& window_or_worker() const;
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
@@ -44,7 +48,6 @@ private:
     WebIDL::ExceptionOr<HighResolutionTime::DOMHighResTimeStamp> convert_name_to_timestamp(JS::Realm& realm, String const& name);
     WebIDL::ExceptionOr<HighResolutionTime::DOMHighResTimeStamp> convert_mark_to_timestamp(JS::Realm& realm, Variant<String, HighResolutionTime::DOMHighResTimeStamp> mark);
 
-    JS::NonnullGCPtr<HTML::Window> m_window;
     JS::GCPtr<NavigationTiming::PerformanceTiming> m_timing;
 
     Core::ElapsedTimer m_timer;

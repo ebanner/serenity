@@ -7,7 +7,6 @@ The WSL Remote extension allows you to use VS Code in Windows while using the no
 The recommended extensions for VS Code include:
 
 - [clangd](https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd)
-- [clang-format](https://marketplace.visualstudio.com/items?itemName=xaver.clang-format)
 - [GitLens](https://marketplace.visualstudio.com/items?itemName=eamodio.gitlens)
 
 ## Code comprehension
@@ -25,7 +24,14 @@ Depending on which configuration you use most, set the CompilationDatabase confi
 CompileFlags:
   Add: [-D__serenity__]
   CompilationDatabase: Build/x86_64
+  
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
 ```
+
+The UnusedIncludes and MissingIncludes flags are used to disable the [Include Cleaner](https://clangd.llvm.org/design/include-cleaner) feature of newer clangd releases.
+It can be re-enabled if you don't mind the noisy inlay hints and problems in the problem view.
 
 Run ``./Meta/serenity.sh run`` at least once to generate the ``compile_commands.json`` file.
 
@@ -77,7 +83,7 @@ following ``c_cpp_properties.json`` to circumvent some errors. Even with the con
             ],
             "compilerPath": "${workspaceFolder}/Toolchain/Local/x86_64/bin/x86_64-pc-serenity-g++",
             "cStandard": "c17",
-            "cppStandard": "c++20",
+            "cppStandard": "c++23",
             "intelliSenseMode": "linux-gcc-x86",
             "compileCommands": "Build/x86_64/compile_commands.json",
             "compilerArgs": [
@@ -112,7 +118,7 @@ following ``c_cpp_properties.json`` to circumvent some errors. Even with the con
 
 ## Formatting
 
-The [clang-format extension](https://marketplace.visualstudio.com/items?itemName=xaver.clang-format) works out of the box. ``clang-format`` support is also included with the Microsoft C/C++ tools (see above). The settings below include a key that makes the Microsoft extension use the proper style.
+clangd provides code formatting out of the box using the ``clang-format`` engine. ``clang-format`` support is also included with the Microsoft C/C++ tools (see above). The settings below include a key that makes the Microsoft extension use the proper style.
 
 ## Settings
 

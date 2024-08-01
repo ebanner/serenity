@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLProgressElementPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -27,7 +28,7 @@ HTMLProgressElement::~HTMLProgressElement() = default;
 void HTMLProgressElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLProgressElementPrototype>(realm, "HTMLProgressElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLProgressElement);
 }
 
 void HTMLProgressElement::visit_edges(Cell::Visitor& visitor)
@@ -48,8 +49,8 @@ double HTMLProgressElement::value() const
 
 WebIDL::ExceptionOr<void> HTMLProgressElement::set_value(double value)
 {
-    if (value < 0 || value > max())
-        return {};
+    if (value < 0)
+        value = 0;
 
     TRY(set_attribute(HTML::AttributeNames::value, MUST(String::number(value))));
     update_progress_value_element();
@@ -69,7 +70,7 @@ double HTMLProgressElement::max() const
 WebIDL::ExceptionOr<void> HTMLProgressElement::set_max(double value)
 {
     if (value <= 0)
-        return {};
+        value = 1;
 
     TRY(set_attribute(HTML::AttributeNames::max, MUST(String::number(value))));
     update_progress_value_element();
@@ -96,7 +97,7 @@ void HTMLProgressElement::removed_from(DOM::Node*)
 
 void HTMLProgressElement::create_shadow_tree_if_needed()
 {
-    if (shadow_root_internal())
+    if (shadow_root())
         return;
 
     auto shadow_root = heap().allocate<DOM::ShadowRoot>(realm(), document(), *this, Bindings::ShadowRootMode::Closed);
@@ -114,7 +115,8 @@ void HTMLProgressElement::create_shadow_tree_if_needed()
 
 void HTMLProgressElement::update_progress_value_element()
 {
-    MUST(m_progress_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, MUST(String::formatted("{}%", position() * 100))));
+    if (m_progress_value_element)
+        MUST(m_progress_value_element->style_for_bindings()->set_property(CSS::PropertyID::Width, MUST(String::formatted("{}%", position() * 100))));
 }
 
 }

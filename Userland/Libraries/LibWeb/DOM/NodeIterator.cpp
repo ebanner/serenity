@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/NodeIteratorPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/NodeIterator.h>
@@ -26,7 +27,7 @@ NodeIterator::~NodeIterator() = default;
 void NodeIterator::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::NodeIteratorPrototype>(realm, "NodeIterator"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(NodeIterator);
 }
 
 void NodeIterator::finalize()

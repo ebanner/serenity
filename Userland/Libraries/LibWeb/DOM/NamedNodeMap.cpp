@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/NamedNodeMapPrototype.h>
 #include <LibWeb/DOM/Attr.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/NamedNodeMap.h>
@@ -36,15 +37,14 @@ NamedNodeMap::NamedNodeMap(Element& element)
 void NamedNodeMap::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::NamedNodeMapPrototype>(realm, "NamedNodeMap"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(NamedNodeMap);
 }
 
 void NamedNodeMap::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_element);
-    for (auto& attribute : m_attributes)
-        visitor.visit(attribute);
+    visitor.visit(m_attributes);
 }
 
 // https://dom.spec.whatwg.org/#ref-for-dfn-supported-property-indices%E2%91%A3
@@ -169,6 +169,19 @@ Attr const* NamedNodeMap::get_attribute(FlyString const& qualified_name, size_t*
 
         if (item_index)
             ++(*item_index);
+    }
+
+    return nullptr;
+}
+
+Attr const* NamedNodeMap::get_attribute_with_lowercase_qualified_name(FlyString const& lowercase_qualified_name) const
+{
+    bool compare_as_lowercase = associated_element().namespace_uri() == Namespace::HTML;
+    VERIFY(compare_as_lowercase);
+
+    for (auto const& attribute : m_attributes) {
+        if (attribute->lowercase_name() == lowercase_qualified_name)
+            return attribute;
     }
 
     return nullptr;
@@ -327,6 +340,21 @@ WebIDL::ExceptionOr<JS::Value> NamedNodeMap::named_item_value(FlyString const& n
     if (!node)
         return JS::js_undefined();
     return node;
+}
+
+// https://dom.spec.whatwg.org/#dom-element-removeattributenode
+WebIDL::ExceptionOr<JS::NonnullGCPtr<Attr>> NamedNodeMap::remove_attribute_node(JS::NonnullGCPtr<Attr> attr)
+{
+    // 1. If this’s attribute list does not contain attr, then throw a "NotFoundError" DOMException.
+    auto index = m_attributes.find_first_index(attr);
+    if (!index.has_value())
+        return WebIDL::NotFoundError::create(realm(), "Attribute not found"_fly_string);
+
+    // 2. Remove attr.
+    remove_attribute_at_index(index.value());
+
+    // 3. Return attr.
+    return attr;
 }
 
 }

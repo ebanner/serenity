@@ -21,10 +21,14 @@
 #include <LibWeb/CSS/Ratio.h>
 #include <LibWeb/CSS/Size.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BasicShapeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/Transformation.h>
 
 namespace Web::CSS {
+
+using ClipRule = FillRule;
 
 struct FlexBasisContent { };
 using FlexBasis = Variant<FlexBasisContent, Size>;
@@ -74,6 +78,13 @@ struct ResolvedBackdropFilter {
     bool is_none() const { return filters.size() == 0; }
 
     Vector<FilterFunction> filters;
+};
+
+struct ObjectPosition {
+    PositionEdge edge_x { PositionEdge::Left };
+    CSS::LengthPercentage offset_x { Percentage(50) };
+    PositionEdge edge_y { PositionEdge::Top };
+    CSS::LengthPercentage offset_y { Percentage(50) };
 };
 
 class InitialValues {
@@ -126,6 +137,7 @@ public:
     static float opacity() { return 1.0f; }
     static float fill_opacity() { return 1.0f; }
     static CSS::FillRule fill_rule() { return CSS::FillRule::Nonzero; }
+    static CSS::ClipRule clip_rule() { return CSS::ClipRule::Nonzero; }
     static float stroke_opacity() { return 1.0f; }
     static float stop_opacity() { return 1.0f; }
     static CSS::TextAnchor text_anchor() { return CSS::TextAnchor::Start; }
@@ -154,17 +166,30 @@ public:
     static Vector<Vector<String>> grid_template_areas() { return {}; }
     static CSS::Time transition_delay() { return CSS::Time::make_seconds(0); }
     static CSS::ObjectFit object_fit() { return CSS::ObjectFit::Fill; }
+    static CSS::ObjectPosition object_position() { return {}; }
     static Color outline_color() { return Color::Black; }
     static CSS::Length outline_offset() { return CSS::Length::make_px(0); }
     static CSS::OutlineStyle outline_style() { return CSS::OutlineStyle::None; }
     static CSS::Length outline_width() { return CSS::Length::make_px(3); }
     static CSS::TableLayout table_layout() { return CSS::TableLayout::Auto; }
     static QuotesData quotes() { return QuotesData { .type = QuotesData::Type::Auto }; }
+    static CSS::TransformBox transform_box() { return CSS::TransformBox::ViewBox; }
+
+    // https://www.w3.org/TR/SVG/geometry.html
+    static LengthPercentage cx() { return CSS::Length::make_px(0); }
+    static LengthPercentage cy() { return CSS::Length::make_px(0); }
+    static LengthPercentage r() { return CSS::Length::make_px(0); }
+    static LengthPercentage rx() { return CSS::Length::make_auto(); }
+    static LengthPercentage ry() { return CSS::Length::make_auto(); }
+    static LengthPercentage x() { return CSS::Length::make_px(0); }
+    static LengthPercentage y() { return CSS::Length::make_px(0); }
 
     static CSS::MaskType mask_type() { return CSS::MaskType::Luminance; }
     static CSS::MathShift math_shift() { return CSS::MathShift::Normal; }
     static CSS::MathStyle math_style() { return CSS::MathStyle::Normal; }
     static int math_depth() { return 0; }
+
+    static CSS::ScrollbarWidth scrollbar_width() { return CSS::ScrollbarWidth::Auto; }
 };
 
 enum class BackgroundSize {
@@ -180,33 +205,61 @@ public:
         : m_value(color)
     {
     }
-    SVGPaint(AK::URL const& url)
+    SVGPaint(URL::URL const& url)
         : m_value(url)
     {
     }
 
     bool is_color() const { return m_value.has<Color>(); }
-    bool is_url() const { return m_value.has<AK::URL>(); }
+    bool is_url() const { return m_value.has<URL::URL>(); }
     Color as_color() const { return m_value.get<Color>(); }
-    AK::URL const& as_url() const { return m_value.get<AK::URL>(); }
+    URL::URL const& as_url() const { return m_value.get<URL::URL>(); }
 
 private:
-    Variant<AK::URL, Color> m_value;
+    Variant<URL::URL, Color> m_value;
 };
 
 // https://drafts.fxtf.org/css-masking-1/#typedef-mask-reference
 class MaskReference {
 public:
     // TODO: Support other mask types.
-    MaskReference(AK::URL const& url)
+    MaskReference(URL::URL const& url)
         : m_url(url)
     {
     }
 
-    AK::URL const& url() const { return m_url; }
+    URL::URL const& url() const { return m_url; }
 
 private:
-    AK::URL m_url;
+    URL::URL m_url;
+};
+
+// https://drafts.fxtf.org/css-masking/#the-clip-path
+// TODO: Support clip sources.
+class ClipPathReference {
+public:
+    ClipPathReference(URL::URL const& url)
+        : m_clip_source(url)
+    {
+    }
+
+    ClipPathReference(BasicShapeStyleValue const& basic_shape)
+        : m_clip_source(basic_shape)
+    {
+    }
+
+    bool is_basic_shape() const { return m_clip_source.has<BasicShape>(); }
+
+    bool is_url() const { return m_clip_source.has<URL::URL>(); }
+
+    URL::URL const& url() const { return m_clip_source.get<URL::URL>(); }
+
+    BasicShapeStyleValue const& basic_shape() const { return *m_clip_source.get<BasicShape>(); }
+
+private:
+    using BasicShape = NonnullRefPtr<BasicShapeStyleValue const>;
+
+    Variant<URL::URL, BasicShape> m_clip_source;
 };
 
 struct BackgroundLayerData {
@@ -284,7 +337,13 @@ inline Gfx::Painter::ScalingMode to_gfx_scaling_mode(CSS::ImageRendering css_val
 }
 
 class ComputedValues {
+    AK_MAKE_NONCOPYABLE(ComputedValues);
+    AK_MAKE_NONMOVABLE(ComputedValues);
+
 public:
+    ComputedValues() = default;
+    ~ComputedValues() = default;
+
     AspectRatio aspect_ratio() const { return m_noninherited.aspect_ratio; }
     CSS::Float float_() const { return m_noninherited.float_; }
     CSS::Length border_spacing_horizontal() const { return m_inherited.border_spacing_horizontal; }
@@ -349,6 +408,8 @@ public:
     CSS::Size const& row_gap() const { return m_noninherited.row_gap; }
     CSS::BorderCollapse border_collapse() const { return m_inherited.border_collapse; }
     Vector<Vector<String>> const& grid_template_areas() const { return m_noninherited.grid_template_areas; }
+    CSS::ObjectFit object_fit() const { return m_noninherited.object_fit; }
+    CSS::ObjectPosition object_position() const { return m_noninherited.object_position; }
 
     CSS::LengthBox const& inset() const { return m_noninherited.inset; }
     const CSS::LengthBox& margin() const { return m_noninherited.margin; }
@@ -385,8 +446,19 @@ public:
     CSS::TextAnchor text_anchor() const { return m_inherited.text_anchor; }
     Optional<MaskReference> const& mask() const { return m_noninherited.mask; }
     CSS::MaskType mask_type() const { return m_noninherited.mask_type; }
+    Optional<ClipPathReference> const& clip_path() const { return m_noninherited.clip_path; }
+    CSS::ClipRule clip_rule() const { return m_inherited.clip_rule; }
+
+    LengthPercentage const& cx() const { return m_noninherited.cx; }
+    LengthPercentage const& cy() const { return m_noninherited.cy; }
+    LengthPercentage const& r() const { return m_noninherited.r; }
+    LengthPercentage const& rx() const { return m_noninherited.ry; }
+    LengthPercentage const& ry() const { return m_noninherited.ry; }
+    LengthPercentage const& x() const { return m_noninherited.x; }
+    LengthPercentage const& y() const { return m_noninherited.y; }
 
     Vector<CSS::Transformation> const& transformations() const { return m_noninherited.transformations; }
+    CSS::TransformBox const& transform_box() const { return m_noninherited.transform_box; }
     CSS::TransformOrigin const& transform_origin() const { return m_noninherited.transform_origin; }
 
     Gfx::FontCascadeList const& font_list() const { return *m_inherited.font_list; }
@@ -409,10 +481,12 @@ public:
     CSS::MathStyle math_style() const { return m_inherited.math_style; }
     int math_depth() const { return m_inherited.math_depth; }
 
-    ComputedValues clone_inherited_values() const
+    CSS::ScrollbarWidth scrollbar_width() const { return m_noninherited.scrollbar_width; }
+
+    NonnullOwnPtr<ComputedValues> clone_inherited_values() const
     {
-        ComputedValues clone;
-        clone.m_inherited = m_inherited;
+        auto clone = make<ComputedValues>();
+        clone->m_inherited = m_inherited;
         return clone;
     }
 
@@ -449,6 +523,7 @@ protected:
         float stroke_opacity { InitialValues::stroke_opacity() };
         LengthPercentage stroke_width { Length::make_px(1) };
         CSS::TextAnchor text_anchor { InitialValues::text_anchor() };
+        CSS::ClipRule clip_rule { InitialValues::clip_rule() };
 
         Vector<ShadowData> text_shadow;
 
@@ -508,6 +583,7 @@ protected:
         float opacity { InitialValues::opacity() };
         Vector<ShadowData> box_shadow {};
         Vector<CSS::Transformation> transformations {};
+        CSS::TransformBox transform_box { InitialValues::transform_box() };
         CSS::TransformOrigin transform_origin {};
         CSS::BoxSizing box_sizing { InitialValues::box_sizing() };
         CSS::ContentData content;
@@ -533,9 +609,22 @@ protected:
         CSS::OutlineStyle outline_style { InitialValues::outline_style() };
         CSS::Length outline_width { InitialValues::outline_width() };
         CSS::TableLayout table_layout { InitialValues::table_layout() };
+        CSS::ObjectFit object_fit { InitialValues::object_fit() };
+        CSS::ObjectPosition object_position { InitialValues::object_position() };
 
         Optional<MaskReference> mask;
         CSS::MaskType mask_type { InitialValues::mask_type() };
+        Optional<ClipPathReference> clip_path;
+
+        LengthPercentage cx { InitialValues::cx() };
+        LengthPercentage cy { InitialValues::cy() };
+        LengthPercentage r { InitialValues::r() };
+        LengthPercentage rx { InitialValues::rx() };
+        LengthPercentage ry { InitialValues::ry() };
+        LengthPercentage x { InitialValues::x() };
+        LengthPercentage y { InitialValues::x() };
+
+        CSS::ScrollbarWidth scrollbar_width { InitialValues::scrollbar_width() };
     } m_noninherited;
 };
 
@@ -620,6 +709,7 @@ public:
     void set_justify_self(CSS::JustifySelf value) { m_noninherited.justify_self = value; }
     void set_box_shadow(Vector<ShadowData>&& value) { m_noninherited.box_shadow = move(value); }
     void set_transformations(Vector<CSS::Transformation> value) { m_noninherited.transformations = move(value); }
+    void set_transform_box(CSS::TransformBox value) { m_noninherited.transform_box = value; }
     void set_transform_origin(CSS::TransformOrigin value) { m_noninherited.transform_origin = value; }
     void set_box_sizing(CSS::BoxSizing value) { m_noninherited.box_sizing = value; }
     void set_vertical_align(Variant<CSS::VerticalAlign, CSS::LengthPercentage> value) { m_noninherited.vertical_align = move(value); }
@@ -641,6 +731,8 @@ public:
     void set_transition_delay(CSS::Time const& transition_delay) { m_noninherited.transition_delay = transition_delay; }
     void set_table_layout(CSS::TableLayout value) { m_noninherited.table_layout = value; }
     void set_quotes(CSS::QuotesData value) { m_inherited.quotes = value; }
+    void set_object_fit(CSS::ObjectFit value) { m_noninherited.object_fit = value; }
+    void set_object_position(CSS::ObjectPosition value) { m_noninherited.object_position = value; }
 
     void set_fill(SVGPaint value) { m_inherited.fill = value; }
     void set_stroke(SVGPaint value) { m_inherited.stroke = value; }
@@ -657,10 +749,22 @@ public:
     void set_outline_width(CSS::Length value) { m_noninherited.outline_width = value; }
     void set_mask(MaskReference value) { m_noninherited.mask = value; }
     void set_mask_type(CSS::MaskType value) { m_noninherited.mask_type = value; }
+    void set_clip_path(ClipPathReference value) { m_noninherited.clip_path = value; }
+    void set_clip_rule(CSS::ClipRule value) { m_inherited.clip_rule = value; }
+
+    void set_cx(LengthPercentage cx) { m_noninherited.cx = cx; }
+    void set_cy(LengthPercentage cy) { m_noninherited.cy = cy; }
+    void set_r(LengthPercentage r) { m_noninherited.r = r; }
+    void set_rx(LengthPercentage rx) { m_noninherited.rx = rx; }
+    void set_ry(LengthPercentage ry) { m_noninherited.ry = ry; }
+    void set_x(LengthPercentage x) { m_noninherited.x = x; }
+    void set_y(LengthPercentage y) { m_noninherited.y = y; }
 
     void set_math_shift(CSS::MathShift value) { m_inherited.math_shift = value; }
     void set_math_style(CSS::MathStyle value) { m_inherited.math_style = value; }
     void set_math_depth(int value) { m_inherited.math_depth = value; }
+
+    void set_scrollbar_width(CSS::ScrollbarWidth value) { m_noninherited.scrollbar_width = value; }
 };
 
 }

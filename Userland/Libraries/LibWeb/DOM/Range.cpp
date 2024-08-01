@@ -7,11 +7,13 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/RangePrototype.h>
 #include <LibWeb/DOM/Comment.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/DocumentType.h>
 #include <LibWeb/DOM/ElementFactory.h>
+#include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/ProcessingInstruction.h>
 #include <LibWeb/DOM/Range.h>
@@ -24,6 +26,7 @@
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Painting/Paintable.h>
+#include <LibWeb/Painting/ViewportPaintable.h>
 
 namespace Web::DOM {
 
@@ -77,7 +80,7 @@ Range::~Range()
 void Range::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::RangePrototype>(realm, "Range"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Range);
 }
 
 void Range::visit_edges(Cell::Visitor& visitor)
@@ -96,10 +99,24 @@ void Range::update_associated_selection()
 {
     if (!m_associated_selection)
         return;
-    if (auto* layout_root = m_associated_selection->document()->layout_node(); layout_root && layout_root->paintable()) {
-        layout_root->recompute_selection_states();
-        layout_root->paintable()->set_needs_display();
+    if (auto* viewport = m_associated_selection->document()->paintable()) {
+        viewport->recompute_selection_states();
+        viewport->set_needs_display();
     }
+
+    // https://w3c.github.io/selection-api/#selectionchange-event
+    // When the selection is dissociated with its range, associated with a new range or the associated range's boundary
+    // point is mutated either by the user or the content script, the user agent must queue a task on the user interaction
+    // task source to fire an event named selectionchange, which does not bubble and is not cancelable, at the document
+    // associated with the selection.
+    auto document = m_associated_selection->document();
+    queue_global_task(HTML::Task::Source::UserInteraction, relevant_global_object(*document), JS::create_heap_function(document->heap(), [document] {
+        EventInit event_init;
+        event_init.bubbles = false;
+        event_init.cancelable = false;
+        auto event = DOM::Event::create(document->realm(), HTML::EventNames::selectionchange, event_init);
+        document->dispatch_event(event);
+    }));
 }
 
 // https://dom.spec.whatwg.org/#concept-range-root
@@ -615,7 +632,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::extract()
     // 4. If original start node is original end node and it is a CharacterData node, then:
     if (original_start_node.ptr() == original_end_node.ptr() && is<CharacterData>(*original_start_node)) {
         // 1. Let clone be a clone of original start node.
-        auto clone = original_start_node->clone_node();
+        auto clone = TRY(original_start_node->clone_node());
 
         // 2. Set the data of clone to the result of substringing data with node original start node,
         //    offset original start offset, and count original end offset minus original start offset.
@@ -705,7 +722,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::extract()
     // 15. If first partially contained child is a CharacterData node, then:
     if (first_partially_contained_child && is<CharacterData>(*first_partially_contained_child)) {
         // 1. Let clone be a clone of original start node.
-        auto clone = original_start_node->clone_node();
+        auto clone = TRY(original_start_node->clone_node());
 
         // 2. Set the data of clone to the result of substringing data with node original start node, offset original start offset,
         //    and count original start node’s length minus original start offset.
@@ -721,7 +738,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::extract()
     // 16. Otherwise, if first partially contained child is not null:
     else if (first_partially_contained_child) {
         // 1. Let clone be a clone of first partially contained child.
-        auto clone = first_partially_contained_child->clone_node();
+        auto clone = TRY(first_partially_contained_child->clone_node());
 
         // 2. Append clone to fragment.
         TRY(fragment->append_child(clone));
@@ -744,7 +761,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::extract()
     // 18. If last partially contained child is a CharacterData node, then:
     if (last_partially_contained_child && is<CharacterData>(*last_partially_contained_child)) {
         // 1. Let clone be a clone of original end node.
-        auto clone = original_end_node->clone_node();
+        auto clone = TRY(original_end_node->clone_node());
 
         // 2. Set the data of clone to the result of substringing data with node original end node, offset 0, and count original end offset.
         auto result = TRY(static_cast<CharacterData const&>(*original_end_node).substring_data(0, original_end_offset));
@@ -759,7 +776,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::extract()
     // 19. Otherwise, if last partially contained child is not null:
     else if (last_partially_contained_child) {
         // 1. Let clone be a clone of last partially contained child.
-        auto clone = last_partially_contained_child->clone_node();
+        auto clone = TRY(last_partially_contained_child->clone_node());
 
         // 2. Append clone to fragment.
         TRY(fragment->append_child(clone));
@@ -944,7 +961,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::clone_the_content
     // 4. If original start node is original end node and it is a CharacterData node, then:
     if (original_start_node.ptr() == original_end_node.ptr() && is<CharacterData>(*original_start_node)) {
         // 1. Let clone be a clone of original start node.
-        auto clone = original_start_node->clone_node();
+        auto clone = TRY(original_start_node->clone_node());
 
         // 2. Set the data of clone to the result of substringing data with node original start node,
         //    offset original start offset, and count original end offset minus original start offset.
@@ -1009,7 +1026,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::clone_the_content
     // 13. If first partially contained child is a CharacterData node, then:
     if (first_partially_contained_child && is<CharacterData>(*first_partially_contained_child)) {
         // 1. Let clone be a clone of original start node.
-        auto clone = original_start_node->clone_node();
+        auto clone = TRY(original_start_node->clone_node());
 
         // 2. Set the data of clone to the result of substringing data with node original start node, offset original start offset,
         //    and count original start node’s length minus original start offset.
@@ -1022,7 +1039,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::clone_the_content
     // 14. Otherwise, if first partially contained child is not null:
     else if (first_partially_contained_child) {
         // 1. Let clone be a clone of first partially contained child.
-        auto clone = first_partially_contained_child->clone_node();
+        auto clone = TRY(first_partially_contained_child->clone_node());
 
         // 2. Append clone to fragment.
         TRY(fragment->append_child(clone));
@@ -1040,7 +1057,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::clone_the_content
     // 15. For each contained child in contained children.
     for (auto& contained_child : contained_children) {
         // 1. Let clone be a clone of contained child with the clone children flag set.
-        auto clone = contained_child->clone_node(nullptr, true);
+        auto clone = TRY(contained_child->clone_node(nullptr, true));
 
         // 2. Append clone to fragment.
         TRY(fragment->append_child(move(clone)));
@@ -1049,7 +1066,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::clone_the_content
     // 16. If last partially contained child is a CharacterData node, then:
     if (last_partially_contained_child && is<CharacterData>(*last_partially_contained_child)) {
         // 1. Let clone be a clone of original end node.
-        auto clone = original_end_node->clone_node();
+        auto clone = TRY(original_end_node->clone_node());
 
         // 2. Set the data of clone to the result of substringing data with node original end node, offset 0, and count original end offset.
         auto result = TRY(static_cast<CharacterData const&>(*original_end_node).substring_data(0, original_end_offset));
@@ -1061,7 +1078,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::clone_the_content
     // 17. Otherwise, if last partially contained child is not null:
     else if (last_partially_contained_child) {
         // 1. Let clone be a clone of last partially contained child.
-        auto clone = last_partially_contained_child->clone_node();
+        auto clone = TRY(last_partially_contained_child->clone_node());
 
         // 2. Append clone to fragment.
         TRY(fragment->append_child(clone));
@@ -1102,7 +1119,7 @@ WebIDL::ExceptionOr<void> Range::delete_contents()
 
     // 4. Let nodes to remove be a list of all the nodes that are contained in this, in tree order, omitting any node whose parent is also contained in this.
     JS::MarkedVector<Node*> nodes_to_remove(heap());
-    for (Node const* node = start_container(); node != end_container()->next_in_pre_order(); node = node->next_in_pre_order()) {
+    for (Node const* node = start_container(); node != end_container()->next_sibling(); node = node->next_in_pre_order()) {
         if (contains_node(*node) && (!node->parent_node() || !contains_node(*node->parent_node())))
             nodes_to_remove.append(const_cast<Node*>(node));
     }
@@ -1202,17 +1219,37 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<DocumentFragment>> Range::create_contextual
     }
 
     // 3. Let fragment node be the result of invoking the fragment parsing algorithm with fragment as markup, and element as the context element.
-    auto fragment_node = TRY(DOMParsing::parse_fragment(fragment.to_byte_string(), *element));
+    auto fragment_node = TRY(DOMParsing::parse_fragment(fragment, *element));
 
     // 4. Unmark all scripts in fragment node as "already started" and as "parser-inserted".
     fragment_node->for_each_in_subtree_of_type<HTML::HTMLScriptElement>([&](HTML::HTMLScriptElement& script_element) {
         script_element.unmark_as_already_started({});
         script_element.unmark_as_parser_inserted({});
-        return IterationDecision::Continue;
+        return TraversalDecision::Continue;
     });
 
     // 5. Return the value of fragment node.
     return fragment_node;
+}
+
+void Range::increase_start_offset(Badge<Node>, WebIDL::UnsignedLong count)
+{
+    m_start_offset += count;
+}
+
+void Range::increase_end_offset(Badge<Node>, WebIDL::UnsignedLong count)
+{
+    m_end_offset += count;
+}
+
+void Range::decrease_start_offset(Badge<Node>, WebIDL::UnsignedLong count)
+{
+    m_start_offset -= count;
+}
+
+void Range::decrease_end_offset(Badge<Node>, WebIDL::UnsignedLong count)
+{
+    m_end_offset -= count;
 }
 
 }

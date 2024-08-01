@@ -156,6 +156,8 @@ void Editor::set_default_keybinds()
     register_key_input_callback(ctrl('K'), EDITOR_INTERNAL_FUNCTION(erase_to_end));
     register_key_input_callback(ctrl('L'), EDITOR_INTERNAL_FUNCTION(clear_screen));
     register_key_input_callback(ctrl('R'), EDITOR_INTERNAL_FUNCTION(enter_search));
+    register_key_input_callback(ctrl(']'), EDITOR_INTERNAL_FUNCTION(search_character_forwards));
+    register_key_input_callback(Key { ctrl(']'), Key::Alt }, EDITOR_INTERNAL_FUNCTION(search_character_backwards));
     register_key_input_callback(ctrl('T'), EDITOR_INTERNAL_FUNCTION(transpose_characters));
     register_key_input_callback('\n', EDITOR_INTERNAL_FUNCTION(finish));
 
@@ -172,6 +174,7 @@ void Editor::set_default_keybinds()
     // ^[^H: alt-backspace: backward delete word
     register_key_input_callback(Key { '\b', Key::Alt }, EDITOR_INTERNAL_FUNCTION(erase_alnum_word_backwards));
     register_key_input_callback(Key { 'd', Key::Alt }, EDITOR_INTERNAL_FUNCTION(erase_alnum_word_forwards));
+    register_key_input_callback(Key { '\\', Key::Alt }, EDITOR_INTERNAL_FUNCTION(erase_spaces));
     register_key_input_callback(Key { 'c', Key::Alt }, EDITOR_INTERNAL_FUNCTION(capitalize_word));
     register_key_input_callback(Key { 'l', Key::Alt }, EDITOR_INTERNAL_FUNCTION(lowercase_word));
     register_key_input_callback(Key { 'u', Key::Alt }, EDITOR_INTERNAL_FUNCTION(uppercase_word));
@@ -625,8 +628,8 @@ ErrorOr<void> Editor::interrupted()
         auto stderr_stream = TRY(Core::File::standard_error());
         TRY(reposition_cursor(*stderr_stream, true));
         if (TRY(m_suggestion_display->cleanup())) {
-            m_times_tab_pressed = 0;
             TRY(reposition_cursor(*stderr_stream, true));
+            TRY(cleanup_suggestions());
         }
         TRY(stderr_stream->write_until_depleted("\r"sv.bytes()));
     }
@@ -644,12 +647,38 @@ ErrorOr<void> Editor::resized()
 {
     m_was_resized = true;
     m_previous_num_columns = m_num_columns;
+    auto old_origin_row = m_origin_row;
+    auto old_origin_column = m_origin_column;
+
     get_terminal_size();
 
     if (!m_has_origin_reset_scheduled) {
         // Reset the origin, but make sure it doesn't blow up if we can't read it
         if (set_origin(false)) {
+            // The origin we have right now actually points to where the cursor should be (in the middle of the buffer somewhere)
+            // Find the "true" origin.
+            auto current_buffer_metrics = actual_rendered_string_metrics(buffer_view(), m_current_masks);
+            auto lines = m_cached_prompt_metrics.lines_with_addition(current_buffer_metrics, m_num_columns);
+            auto offset = m_cached_prompt_metrics.offset_with_addition(current_buffer_metrics, m_num_columns);
+            if (lines > m_origin_row)
+                m_origin_row = 1;
+            else
+                m_origin_row -= lines - 1; // the prompt and the origin share a line.
+
+            if (offset > m_origin_column)
+                m_origin_column = 1;
+            else
+                m_origin_column -= offset;
+
+            set_origin(m_origin_row, m_origin_column);
+
             TRY(handle_resize_event(false));
+            if (old_origin_column != m_origin_column || old_origin_row != m_origin_row) {
+                m_expected_origin_changed = true;
+                deferred_invoke([this] {
+                    (void)refresh_display();
+                });
+            }
         } else {
             deferred_invoke([this] { handle_resize_event(true).release_value_but_fixme_should_propagate_errors(); });
             m_has_origin_reset_scheduled = true;
@@ -1365,8 +1394,9 @@ ErrorOr<void> Editor::refresh_display()
     // Someone changed the window size, figure it out
     // and react to it, we might need to redraw.
     if (m_was_resized) {
-        if (m_previous_num_columns != m_num_columns) {
+        if (m_expected_origin_changed || m_previous_num_columns != m_num_columns) {
             // We need to cleanup and redo everything.
+            m_expected_origin_changed = false;
             m_cached_prompt_valid = false;
             m_refresh_needed = true;
             swap(m_previous_num_columns, m_num_columns);
@@ -1616,7 +1646,7 @@ ErrorOr<void> Editor::reposition_cursor(Stream& stream, bool to_end)
 
 ErrorOr<void> VT::move_absolute(u32 row, u32 col, Stream& stream)
 {
-    return stream.write_until_depleted(ByteString::formatted("\033[{};{}H", row, col).bytes());
+    return stream.write_until_depleted(ByteString::formatted("\033[{};{}H", row, col));
 }
 
 ErrorOr<void> VT::move_relative(int row, int col, Stream& stream)
@@ -1633,9 +1663,9 @@ ErrorOr<void> VT::move_relative(int row, int col, Stream& stream)
         col = -col;
 
     if (row > 0)
-        TRY(stream.write_until_depleted(ByteString::formatted("\033[{}{}", row, x_op).bytes()));
+        TRY(stream.write_until_depleted(ByteString::formatted("\033[{}{}", row, x_op)));
     if (col > 0)
-        TRY(stream.write_until_depleted(ByteString::formatted("\033[{}{}", col, y_op).bytes()));
+        TRY(stream.write_until_depleted(ByteString::formatted("\033[{}{}", col, y_op)));
 
     return {};
 }
@@ -1782,10 +1812,9 @@ ErrorOr<void> VT::apply_style(Style const& style, Stream& stream, bool is_starti
             style.italic() ? 3 : 23,
             style.background().to_vt_escape(),
             style.foreground().to_vt_escape(),
-            style.hyperlink().to_vt_escape(true))
-                                            .bytes()));
+            style.hyperlink().to_vt_escape(true))));
     } else {
-        TRY(stream.write_until_depleted(style.hyperlink().to_vt_escape(false).bytes()));
+        TRY(stream.write_until_depleted(style.hyperlink().to_vt_escape(false)));
     }
 
     return {};
@@ -1794,16 +1823,16 @@ ErrorOr<void> VT::apply_style(Style const& style, Stream& stream, bool is_starti
 ErrorOr<void> VT::clear_lines(size_t count_above, size_t count_below, Stream& stream)
 {
     if (count_below + count_above == 0) {
-        TRY(stream.write_until_depleted("\033[2K"sv.bytes()));
+        TRY(stream.write_until_depleted("\033[2K"sv));
     } else {
         // Go down count_below lines.
         if (count_below > 0)
-            TRY(stream.write_until_depleted(ByteString::formatted("\033[{}B", count_below).bytes()));
+            TRY(stream.write_until_depleted(ByteString::formatted("\033[{}B", count_below)));
         // Then clear lines going upwards.
         for (size_t i = count_below + count_above; i > 0; --i) {
-            TRY(stream.write_until_depleted("\033[2K"sv.bytes()));
+            TRY(stream.write_until_depleted("\033[2K"sv));
             if (i != 1)
-                TRY(stream.write_until_depleted("\033[A"sv.bytes()));
+                TRY(stream.write_until_depleted("\033[A"sv));
         }
     }
 
@@ -1812,17 +1841,17 @@ ErrorOr<void> VT::clear_lines(size_t count_above, size_t count_below, Stream& st
 
 ErrorOr<void> VT::save_cursor(Stream& stream)
 {
-    return stream.write_until_depleted("\033[s"sv.bytes());
+    return stream.write_until_depleted("\033[s"sv);
 }
 
 ErrorOr<void> VT::restore_cursor(Stream& stream)
 {
-    return stream.write_until_depleted("\033[u"sv.bytes());
+    return stream.write_until_depleted("\033[u"sv);
 }
 
 ErrorOr<void> VT::clear_to_end_of_line(Stream& stream)
 {
-    return stream.write_until_depleted("\033[K"sv.bytes());
+    return stream.write_until_depleted("\033[K"sv);
 }
 
 enum VTState {

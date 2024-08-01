@@ -20,11 +20,13 @@ set(AK_TEST_SOURCES
     TestCircularDeque.cpp
     TestCircularQueue.cpp
     TestComplex.cpp
+    TestCoroutine.cpp
     TestDisjointChunks.cpp
     TestDistinctNumeric.cpp
     TestDoublyLinkedList.cpp
     TestEndian.cpp
     TestEnumBits.cpp
+    TestEnumerate.cpp
     TestFind.cpp
     TestFixedArray.cpp
     TestFixedPoint.cpp
@@ -33,6 +35,7 @@ set(AK_TEST_SOURCES
     TestFlyString.cpp
     TestFormat.cpp
     TestFuzzyMatch.cpp
+    TestGeneratorAK.cpp
     TestGenericLexer.cpp
     TestHashFunctions.cpp
     TestHashMap.cpp
@@ -56,6 +59,7 @@ set(AK_TEST_SOURCES
     TestNonnullRefPtr.cpp
     TestNumberFormat.cpp
     TestOptional.cpp
+    TestOptionParser.cpp
     TestOwnPtr.cpp
     TestPrint.cpp
     TestQueue.cpp
@@ -83,7 +87,6 @@ set(AK_TEST_SOURCES
     TestTypeTraits.cpp
     TestTypedTransfer.cpp
     TestUFixedBigInt.cpp
-    TestURL.cpp
     TestUtf16.cpp
     TestUtf8.cpp
     TestVariant.cpp

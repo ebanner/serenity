@@ -18,8 +18,8 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
 
     auto app = TRY(GUI::Application::create(arguments));
 
-    TRY(Core::System::unveil("/home", "r"));
     TRY(Core::System::unveil("/res", "r"));
+    TRY(Core::System::unveil("/usr/share/Maps", "r"));
     TRY(Core::System::unveil("/tmp/session/%sid/portal/config", "rw"));
     TRY(Core::System::unveil(nullptr, nullptr));
 
@@ -27,7 +27,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     auto window = TRY(GUI::SettingsWindow::create("Maps Settings", GUI::SettingsWindow::ShowDefaultsButton::Yes));
     window->set_icon(app_icon.bitmap_for_size(16));
 
-    (void)TRY(window->add_tab(TRY(MapsSettings::MapsSettingsWidget::create()), "Maps"_string, "maps"sv));
+    (void)TRY(window->add_tab<MapsSettings::MapsSettingsWidget>("Maps"_string, "maps"sv));
 
     window->show();
     return app->exec();

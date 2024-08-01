@@ -7,7 +7,6 @@
 
 #pragma once
 
-#include <LibJS/Runtime/TypedArray.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/Streams/ReadableByteStreamController.h>
@@ -30,6 +29,7 @@ public:
     void set_view(JS::GCPtr<WebIDL::ArrayBufferView> value) { m_view = value; }
 
     WebIDL::ExceptionOr<void> respond(WebIDL::UnsignedLongLong bytes_written);
+    WebIDL::ExceptionOr<void> respond_with_new_view(JS::Handle<WebIDL::ArrayBufferView> const& view);
 
 private:
     explicit ReadableStreamBYOBRequest(JS::Realm&);

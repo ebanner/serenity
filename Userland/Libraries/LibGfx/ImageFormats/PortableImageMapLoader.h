@@ -62,6 +62,9 @@ public:
 
     virtual ErrorOr<ImageFrameDescriptor> frame(size_t index, Optional<IntSize> ideal_size = {}) override;
 
+    virtual NaturalFrameFormat natural_frame_format() const override;
+    virtual ErrorOr<NonnullRefPtr<CMYKBitmap>> cmyk_frame() override;
+
 private:
     PortableImageDecoderPlugin(NonnullOwnPtr<SeekableStream> stream);
 
@@ -85,7 +88,10 @@ ErrorOr<NonnullOwnPtr<ImageDecoderPlugin>> PortableImageDecoderPlugin<TContext>:
 {
     auto stream = TRY(try_make<FixedMemoryStream>(data));
     auto plugin = TRY(adopt_nonnull_own_or_enomem(new (nothrow) PortableImageDecoderPlugin<TContext>(move(stream))));
-    TRY(read_header(*plugin->m_context));
+    if constexpr (TContext::FormatDetails::binary_magic_number == '7')
+        TRY(read_pam_header(*plugin->m_context));
+    else
+        TRY(read_header(*plugin->m_context));
     return plugin;
 }
 
@@ -96,8 +102,10 @@ bool PortableImageDecoderPlugin<TContext>::sniff(ReadonlyBytes data)
     if (data.size() < 2)
         return false;
 
-    if (data.data()[0] == 'P' && data.data()[1] == Context::FormatDetails::ascii_magic_number)
-        return true;
+    if constexpr (requires { Context::FormatDetails::ascii_magic_number; }) {
+        if (data.data()[0] == 'P' && data.data()[1] == Context::FormatDetails::ascii_magic_number)
+            return true;
+    }
 
     if (data.data()[0] == 'P' && data.data()[1] == Context::FormatDetails::binary_magic_number)
         return true;
@@ -121,8 +129,45 @@ ErrorOr<ImageFrameDescriptor> PortableImageDecoderPlugin<TContext>::frame(size_t
         }
     }
 
+    if constexpr (requires { TContext::FormatDetails::cmyk_bitmap; }) {
+        if (m_context->format_details.cmyk_bitmap.has_value())
+            m_context->bitmap = TRY(m_context->format_details.cmyk_bitmap.value()->to_low_quality_rgb());
+    }
+
     VERIFY(m_context->bitmap);
     return ImageFrameDescriptor { m_context->bitmap, 0 };
+}
+
+template<typename TContext>
+NaturalFrameFormat PortableImageDecoderPlugin<TContext>::natural_frame_format() const
+{
+    if constexpr (requires { TContext::FormatDetails::cmyk_bitmap; }) {
+        if (m_context->format_details.depth == 4 && m_context->format_details.tupl_type == "CMYK"sv)
+            return NaturalFrameFormat::CMYK;
+    }
+
+    return NaturalFrameFormat::RGB;
+}
+
+template<typename TContext>
+ErrorOr<NonnullRefPtr<CMYKBitmap>> PortableImageDecoderPlugin<TContext>::cmyk_frame()
+{
+    if constexpr (requires { TContext::FormatDetails::cmyk_bitmap; }) {
+        VERIFY(natural_frame_format() == NaturalFrameFormat::CMYK);
+        if (m_context->state == TContext::State::Error)
+            return Error::from_string_literal("PortableImageDecoderPlugin: Decoding failed");
+
+        if (m_context->state < TContext::State::BitmapDecoded) {
+            if (decode(*m_context).is_error()) {
+                m_context->state = TContext::State::Error;
+                return Error::from_string_literal("PortableImageDecoderPlugin: Decoding failed");
+            }
+        }
+
+        return *m_context->format_details.cmyk_bitmap.value();
+    }
+
+    VERIFY_NOT_REACHED();
 }
 
 }

@@ -29,6 +29,9 @@ using NativeFloatingType = Conditional<M == 32, f32, Conditional<M == 64, f64, v
 template<size_t M, size_t N, template<typename> typename SetSign, typename ElementType = SetSign<NativeIntegralType<M>>>
 using NativeVectorType __attribute__((vector_size(N * sizeof(ElementType)))) = ElementType;
 
+template<size_t M, size_t N, typename ElementType = NativeFloatingType<M>>
+using NativeFloatingVectorType __attribute__((vector_size(N * sizeof(ElementType)))) = ElementType;
+
 template<typename T, template<typename> typename SetSign>
 using Native128ByteVectorOf = NativeVectorType<sizeof(T) * 8, 16 / sizeof(T), SetSign, T>;
 
@@ -51,6 +54,8 @@ enum class ParseError {
     InvalidType,
     HugeAllocationRequested,
     OutOfMemory,
+    SectionSizeMismatch,
+    InvalidUtf8,
     // FIXME: This should not exist!
     NotImplemented,
 };
@@ -58,7 +63,7 @@ enum class ParseError {
 ByteString parse_error_to_byte_string(ParseError);
 
 template<typename T>
-using ParseResult = Result<T, ParseError>;
+using ParseResult = ErrorOr<T, ParseError>;
 
 AK_TYPEDEF_DISTINCT_ORDERED_ID(size_t, TypeIndex);
 AK_TYPEDEF_DISTINCT_ORDERED_ID(size_t, FunctionIndex);
@@ -253,6 +258,11 @@ public:
 
     auto min() const { return m_min; }
     auto& max() const { return m_max; }
+    bool is_subset_of(Limits other) const
+    {
+        return m_min >= other.min()
+            && (!other.max().has_value() || (m_max.has_value() && *m_max <= *other.max()));
+    }
 
     static ParseResult<Limits> parse(Stream& stream);
 
@@ -463,7 +473,6 @@ public:
 
 private:
     OpCode m_opcode { 0 };
-    // clang-format off
     Variant<
         BlockType,
         DataIndex,
@@ -492,9 +501,8 @@ private:
         i32,
         i64,
         u128,
-        u8 // Empty state
-    > m_arguments;
-    // clang-format on
+        u8> // Empty state
+        m_arguments;
 };
 
 class CustomSection {
@@ -556,10 +564,8 @@ public:
         template<typename T>
         static ParseResult<Import> parse_with_type(auto&& stream, auto&& module, auto&& name)
         {
-            auto result = T::parse(stream);
-            if (result.is_error())
-                return result.error();
-            return Import { module.release_value(), name.release_value(), result.release_value() };
+            auto result = TRY(T::parse(stream));
+            return Import { module, name, result };
         }
 
         ByteString m_module;
@@ -796,44 +802,6 @@ public:
     struct Declarative {
     };
     struct Passive {
-    };
-
-    struct SegmentType0 {
-        static ParseResult<SegmentType0> parse(Stream& stream);
-
-        Vector<FunctionIndex> function_indices;
-        Active mode;
-    };
-    struct SegmentType1 {
-        static ParseResult<SegmentType1> parse(Stream& stream);
-
-        Vector<FunctionIndex> function_indices;
-    };
-    struct SegmentType2 {
-        // FIXME: Implement me!
-        static ParseResult<SegmentType2> parse(Stream& stream);
-    };
-    struct SegmentType3 {
-        // FIXME: Implement me!
-        static ParseResult<SegmentType3> parse(Stream& stream);
-    };
-    struct SegmentType4 {
-        static ParseResult<SegmentType4> parse(Stream& stream);
-
-        Active mode;
-        Vector<Expression> initializer;
-    };
-    struct SegmentType5 {
-        // FIXME: Implement me!
-        static ParseResult<SegmentType5> parse(Stream& stream);
-    };
-    struct SegmentType6 {
-        // FIXME: Implement me!
-        static ParseResult<SegmentType6> parse(Stream& stream);
-    };
-    struct SegmentType7 {
-        // FIXME: Implement me!
-        static ParseResult<SegmentType7> parse(Stream& stream);
     };
 
     struct Element {

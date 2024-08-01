@@ -39,7 +39,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<WritableStream>> WritableStream::construct_
     // Note: This AO configures slot values which are already specified in the class's field initializers.
 
     // 5. Let sizeAlgorithm be ! ExtractSizeAlgorithm(strategy).
-    auto size_algorithm = extract_size_algorithm(strategy);
+    auto size_algorithm = extract_size_algorithm(vm, strategy);
 
     // 6. Let highWaterMark be ? ExtractHighWaterMark(strategy, 1).
     auto high_water_mark = TRY(extract_high_water_mark(strategy, 1));
@@ -58,7 +58,7 @@ bool WritableStream::locked() const
 }
 
 // https://streams.spec.whatwg.org/#ws-close
-WebIDL::ExceptionOr<JS::GCPtr<JS::Object>> WritableStream::close()
+JS::GCPtr<JS::Object> WritableStream::close()
 {
     auto& realm = this->realm();
 
@@ -75,11 +75,11 @@ WebIDL::ExceptionOr<JS::GCPtr<JS::Object>> WritableStream::close()
     }
 
     // 3. Return ! WritableStreamClose(this).
-    return TRY(writable_stream_close(*this))->promise();
+    return writable_stream_close(*this)->promise();
 }
 
 // https://streams.spec.whatwg.org/#ws-abort
-WebIDL::ExceptionOr<JS::GCPtr<JS::Object>> WritableStream::abort(JS::Value reason)
+JS::GCPtr<JS::Object> WritableStream::abort(JS::Value reason)
 {
     auto& realm = this->realm();
 
@@ -90,7 +90,7 @@ WebIDL::ExceptionOr<JS::GCPtr<JS::Object>> WritableStream::abort(JS::Value reaso
     }
 
     // 2. Return ! WritableStreamAbort(this, reason).
-    return TRY(writable_stream_abort(*this, reason))->promise();
+    return writable_stream_abort(*this, reason)->promise();
 }
 
 // https://streams.spec.whatwg.org/#ws-get-writer
@@ -108,7 +108,7 @@ WritableStream::WritableStream(JS::Realm& realm)
 void WritableStream::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::WritableStreamPrototype>(realm, "WritableStream"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(WritableStream);
 }
 
 void WritableStream::visit_edges(Cell::Visitor& visitor)

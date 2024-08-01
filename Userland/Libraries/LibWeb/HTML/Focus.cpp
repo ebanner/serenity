@@ -55,7 +55,7 @@ static void run_focus_update_steps(Vector<JS::Handle<DOM::Node>> old_chain, Vect
             blur_event_target = entry.ptr();
         } else if (is<DOM::Document>(*entry)) {
             // If entry is a Document object, let blur event target be that Document object's relevant global object.
-            blur_event_target = &static_cast<DOM::Document&>(*entry).window();
+            blur_event_target = static_cast<DOM::Document&>(*entry).window();
         }
 
         // 3. If entry is the last entry in old chain, and entry is an Element,
@@ -79,6 +79,11 @@ static void run_focus_update_steps(Vector<JS::Handle<DOM::Node>> old_chain, Vect
             blur_event->set_related_target(related_blur_target);
             blur_event_target->dispatch_event(blur_event);
         }
+
+        auto focusout_event = UIEvents::FocusEvent::create(blur_event_target->realm(), HTML::EventNames::focusout);
+        focusout_event->set_bubbles(true);
+        focusout_event->set_related_target(related_blur_target);
+        blur_event_target->dispatch_event(focusout_event);
     }
 
     // FIXME: 3. Apply any relevant platform-specific conventions for focusing new focus target.
@@ -100,7 +105,7 @@ static void run_focus_update_steps(Vector<JS::Handle<DOM::Node>> old_chain, Vect
             focus_event_target = entry.ptr();
         } else if (is<DOM::Document>(*entry)) {
             // If entry is a Document object, let focus event target be that Document object's relevant global object.
-            focus_event_target = &static_cast<DOM::Document&>(*entry).window();
+            focus_event_target = static_cast<DOM::Document&>(*entry).window();
         }
 
         // 3. If entry is the last entry in new chain, and entry is an Element,
@@ -123,6 +128,11 @@ static void run_focus_update_steps(Vector<JS::Handle<DOM::Node>> old_chain, Vect
             auto focus_event = UIEvents::FocusEvent::create(focus_event_target->realm(), HTML::EventNames::focus);
             focus_event->set_related_target(related_focus_target);
             focus_event_target->dispatch_event(focus_event);
+
+            auto focusin_event = UIEvents::FocusEvent::create(focus_event_target->realm(), HTML::EventNames::focusin);
+            focusin_event->set_bubbles(true);
+            focusin_event->set_related_target(related_focus_target);
+            focus_event_target->dispatch_event(focusin_event);
         }
     }
 }
@@ -199,13 +209,13 @@ void run_focusing_steps(DOM::Node* new_focus_target, DOM::Node* fallback_target,
     // 5. If new focus target is the currently focused area of a top-level browsing context, then return.
     if (!new_focus_target->document().browsing_context())
         return;
-    auto top_level_browsing_context = new_focus_target->document().browsing_context()->top_level_browsing_context();
-    if (new_focus_target == top_level_browsing_context->currently_focused_area().ptr())
+    auto top_level_traversable = new_focus_target->document().browsing_context()->top_level_traversable();
+    if (new_focus_target == top_level_traversable->currently_focused_area().ptr())
         return;
 
     // 6. Let old chain be the current focus chain of the top-level browsing context in which
     //    new focus target finds itself.
-    auto old_chain = focus_chain(top_level_browsing_context->currently_focused_area());
+    auto old_chain = focus_chain(top_level_traversable->currently_focused_area());
 
     // 7. Let new chain be the focus chain of new focus target.
     auto new_chain = focus_chain(new_focus_target);
@@ -231,10 +241,10 @@ void run_unfocusing_steps(DOM::Node* old_focus_target)
     //    context's DOM anchor, then set old focus target to that currently focused area of a top-level browsing
     //    context.
     if (is_shadow_host(old_focus_target)) {
-        auto* shadow_root = static_cast<DOM::Element*>(old_focus_target)->shadow_root_internal();
+        auto shadow_root = static_cast<DOM::Element*>(old_focus_target)->shadow_root();
         if (shadow_root->delegates_focus()) {
-            auto top_level_browsing_context = old_focus_target->document().browsing_context()->top_level_browsing_context();
-            if (auto currently_focused_area = top_level_browsing_context->currently_focused_area()) {
+            auto top_level_traversable = old_focus_target->document().browsing_context()->top_level_traversable();
+            if (auto currently_focused_area = top_level_traversable->currently_focused_area()) {
                 if (shadow_root->is_shadow_including_ancestor_of(*currently_focused_area)) {
                     old_focus_target = currently_focused_area;
                 }
@@ -251,10 +261,10 @@ void run_unfocusing_steps(DOM::Node* old_focus_target)
 
     // NOTE: HTMLAreaElement is currently missing the shapes property
 
-    auto top_level_browsing_context = old_focus_target->document().browsing_context()->top_level_browsing_context();
+    auto top_level_traversable = old_focus_target->document().browsing_context()->top_level_traversable();
 
     // 4. Let old chain be the current focus chain of the top-level browsing context in which old focus target finds itself.
-    auto old_chain = focus_chain(top_level_browsing_context->currently_focused_area());
+    auto old_chain = focus_chain(top_level_traversable->currently_focused_area());
 
     // 5. If old focus target is not one of the entries in old chain, then return.
     auto it = old_chain.find_if([&](auto const& node) { return old_focus_target == node; });

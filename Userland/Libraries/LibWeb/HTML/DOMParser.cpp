@@ -33,7 +33,7 @@ DOMParser::~DOMParser() = default;
 void DOMParser::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::DOMParserPrototype>(realm, "DOMParser"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(DOMParser);
 }
 
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-domparser-parsefromstring
@@ -53,7 +53,7 @@ JS::NonnullGCPtr<DOM::Document> DOMParser::parse_from_string(StringView string, 
         // 2. Create an HTML parser parser, associated with document.
         // 3. Place string into the input stream for parser. The encoding confidence is irrelevant.
         // FIXME: We don't have the concept of encoding confidence yet.
-        auto parser = HTMLParser::create(*document, string, "UTF-8");
+        auto parser = HTMLParser::create(*document, string, "UTF-8"sv);
 
         // 4. Start parser and let it run until it has consumed all the characters just inserted into the input stream.
         // FIXME: This is to match the default URL. Instead, pass in this's relevant global object's associated Document's URL.
@@ -62,6 +62,7 @@ JS::NonnullGCPtr<DOM::Document> DOMParser::parse_from_string(StringView string, 
         // -> Otherwise
         document = DOM::XMLDocument::create(realm(), verify_cast<HTML::Window>(relevant_global_object(*this)).associated_document().url());
         document->set_content_type(Bindings::idl_enum_to_string(type));
+        document->set_document_type(DOM::Document::Type::XML);
 
         // 1. Create an XML parser parse, associated with document, and with XML scripting support disabled.
         XML::Parser parser(string, { .resolve_external_resource = resolve_xml_resource });

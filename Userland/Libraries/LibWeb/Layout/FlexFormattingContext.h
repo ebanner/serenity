@@ -159,6 +159,9 @@ private:
     void set_main_axis_first_margin(FlexItem&, CSSPixels margin);
     void set_main_axis_second_margin(FlexItem&, CSSPixels margin);
 
+    void set_has_definite_main_size(FlexItem&);
+    void set_has_definite_cross_size(FlexItem&);
+
     void copy_dimensions_from_flex_items_to_boxes();
 
     void generate_anonymous_flex_items();
@@ -187,8 +190,6 @@ private:
     void distribute_any_remaining_free_space();
 
     void align_all_flex_items_along_the_cross_axis();
-
-    void determine_flex_container_used_cross_size();
 
     void align_all_flex_lines();
 

@@ -17,8 +17,8 @@ public:
 
     virtual NonnullOwnPtr<EventLoopImplementation> make_implementation() override;
 
-    virtual int register_timer(EventReceiver&, int milliseconds, bool should_reload, TimerShouldFireWhenNotVisible) override;
-    virtual bool unregister_timer(int timer_id) override;
+    virtual intptr_t register_timer(EventReceiver&, int milliseconds, bool should_reload, TimerShouldFireWhenNotVisible) override;
+    virtual void unregister_timer(intptr_t timer_id) override;
 
     virtual void register_notifier(Notifier&) override;
     virtual void unregister_notifier(Notifier&) override;
@@ -59,7 +59,7 @@ private:
     int m_exit_code { 0 };
 
     // The wake pipe of this event loop needs to be accessible from other threads.
-    int (*m_wake_pipe_fds)[2];
+    Array<int, 2>& m_wake_pipe_fds;
 };
 
 }

@@ -12,11 +12,14 @@
 #include <AK/Utf8View.h>
 #include <AK/Vector.h>
 #include <LibJS/Heap/HeapFunction.h>
+#include <LibJS/Runtime/Array.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Fetch/FetchMethod.h>
-#include <LibWeb/Forward.h>
+#include <LibWeb/HTML/CanvasRenderingContext2D.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/EventSource.h>
+#include <LibWeb/HTML/ImageBitmap.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
@@ -25,16 +28,21 @@
 #include <LibWeb/HTML/Timer.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
+#include <LibWeb/HighResolutionTime/Performance.h>
 #include <LibWeb/HighResolutionTime/SupportedPerformanceTypes.h>
+#include <LibWeb/IndexedDB/IDBFactory.h>
 #include <LibWeb/Infra/Base64.h>
 #include <LibWeb/PerformanceTimeline/EntryTypes.h>
 #include <LibWeb/PerformanceTimeline/PerformanceObserver.h>
 #include <LibWeb/PerformanceTimeline/PerformanceObserverEntryList.h>
+#include <LibWeb/Platform/EventLoopPlugin.h>
+#include <LibWeb/Platform/ImageCodecPlugin.h>
 #include <LibWeb/UserTiming/PerformanceMark.h>
 #include <LibWeb/UserTiming/PerformanceMeasure.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
+#include <LibWeb/WebIDL/Types.h>
 
 namespace Web::HTML {
 
@@ -56,12 +64,14 @@ void WindowOrWorkerGlobalScopeMixin::initialize(JS::Realm&)
 
 void WindowOrWorkerGlobalScopeMixin::visit_edges(JS::Cell::Visitor& visitor)
 {
-    for (auto& it : m_timers)
-        visitor.visit(it.value);
-    for (auto& observer : m_registered_performance_observer_objects)
-        visitor.visit(observer);
+    visitor.visit(m_performance);
+    visitor.visit(m_supported_entry_types_array);
+    visitor.visit(m_timers);
+    visitor.visit(m_registered_performance_observer_objects);
+    visitor.visit(m_indexed_db);
     for (auto& entry : m_performance_entry_buffer_map)
         entry.value.visit_edges(visitor);
+    visitor.visit(m_registered_event_sources);
 }
 
 void WindowOrWorkerGlobalScopeMixin::finalize()
@@ -143,11 +153,100 @@ void WindowOrWorkerGlobalScopeMixin::queue_microtask(WebIDL::CallbackType& callb
         document = &static_cast<Window&>(this_impl()).associated_document();
 
     // The queueMicrotask(callback) method must queue a microtask to invoke callback, and if callback throws an exception, report the exception.
-    HTML::queue_a_microtask(document, [&callback, &realm] {
+    HTML::queue_a_microtask(document, JS::create_heap_function(realm.heap(), [&callback, &realm] {
         auto result = WebIDL::invoke_callback(callback, {});
         if (result.is_error())
             HTML::report_exception(result, realm);
-    });
+    }));
+}
+
+// https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#dom-createimagebitmap
+JS::NonnullGCPtr<JS::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(ImageBitmapSource image, Optional<ImageBitmapOptions> options) const
+{
+    return create_image_bitmap_impl(image, {}, {}, {}, {}, options);
+}
+
+// https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#dom-createimagebitmap
+JS::NonnullGCPtr<JS::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap(ImageBitmapSource image, WebIDL::Long sx, WebIDL::Long sy, WebIDL::Long sw, WebIDL::Long sh, Optional<ImageBitmapOptions> options) const
+{
+    return create_image_bitmap_impl(image, sx, sy, sw, sh, options);
+}
+
+JS::NonnullGCPtr<JS::Promise> WindowOrWorkerGlobalScopeMixin::create_image_bitmap_impl(ImageBitmapSource& image, Optional<WebIDL::Long> sx, Optional<WebIDL::Long> sy, Optional<WebIDL::Long> sw, Optional<WebIDL::Long> sh, Optional<ImageBitmapOptions>& options) const
+{
+    // 1. If either sw or sh is given and is 0, then return a promise rejected with a RangeError.
+    if (sw == 0 || sh == 0) {
+        auto promise = JS::Promise::create(this_impl().realm());
+        auto error_message = MUST(String::formatted("{} is an invalid value for {}", sw == 0 ? *sw : *sh, sw == 0 ? "sw"sv : "sh"sv));
+        promise->reject(JS::RangeError::create(this_impl().realm(), move(error_message)));
+        return promise;
+    }
+
+    // FIXME:
+    // 2. If either options's resizeWidth or options's resizeHeight is present and is 0, then return a promise rejected with an "InvalidStateError" DOMException.
+    (void)options;
+
+    // 3. Check the usability of the image argument. If this throws an exception or returns bad, then return a promise rejected with an "InvalidStateError" DOMException.
+    // FIXME: "Check the usability of the image argument" is only defined for CanvasImageSource, let's skip it for other types
+    if (image.has<CanvasImageSource>()) {
+        if (auto usability = check_usability_of_image(image.get<CanvasImageSource>()); usability.is_error() or usability.value() == CanvasImageSourceUsability::Bad) {
+            auto promise = JS::Promise::create(this_impl().realm());
+            promise->reject(WebIDL::InvalidStateError::create(this_impl().realm(), "image argument is not usable"_string));
+            return promise;
+        }
+    }
+
+    // 4. Let p be a new promise.
+    auto p = JS::Promise::create(this_impl().realm());
+
+    // 5. Let imageBitmap be a new ImageBitmap object.
+    auto image_bitmap = ImageBitmap::create(this_impl().realm());
+
+    // 6. Switch on image:
+    image.visit(
+        [&](JS::Handle<FileAPI::Blob>& blob) {
+            // Run these step in parallel:
+            Platform::EventLoopPlugin::the().deferred_invoke([=]() {
+                // 1. Let imageData be the result of reading image's data. If an error occurs during reading of the
+                // object, then reject p with an "InvalidStateError" DOMException and abort these steps.
+                // FIXME: I guess this is always fine for us as the data is already read.
+                auto const image_data = blob->bytes();
+
+                // FIXME:
+                // 2. Apply the image sniffing rules to determine the file format of imageData, with MIME type of
+                // image (as given by image's type attribute) giving the official type.
+
+                auto on_failed_decode = [p = JS::Handle(*p)](Error&) {
+                    // 3. If imageData is not in a supported image file format (e.g., it's not an image at all), or if
+                    // imageData is corrupted in some fatal way such that the image dimensions cannot be obtained
+                    // (e.g., a vector graphic with no natural size), then reject p with an "InvalidStateError" DOMException
+                    // and abort these steps.
+                    p->reject(WebIDL::InvalidStateError::create(relevant_realm(*p), "image does not contain a supported image format"_string));
+                };
+
+                auto on_successful_decode = [image_bitmap = JS::Handle(*image_bitmap), p = JS::Handle(*p)](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
+                    // 4. Set imageBitmap's bitmap data to imageData, cropped to the source rectangle with formatting.
+                    // If this is an animated image, imageBitmap's bitmap data must only be taken from the default image
+                    // of the animation (the one that the format defines is to be used when animation is not supported
+                    // or is disabled), or, if there is no such image, the first frame of the animation.
+                    image_bitmap->set_bitmap(result.frames.take_first().bitmap);
+
+                    // 5. Resolve p with imageBitmap.
+                    p->fulfill(image_bitmap);
+                    return {};
+                };
+
+                (void)Web::Platform::ImageCodecPlugin::the().decode_image(image_data, move(on_successful_decode), move(on_failed_decode));
+            });
+        },
+        [&](auto&) {
+            dbgln("(STUBBED) createImageBitmap() for non-blob types");
+            (void)sx;
+            (void)sy;
+        });
+
+    // 7. Return p.
+    return p;
 }
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
@@ -303,15 +402,13 @@ i32 WindowOrWorkerGlobalScopeMixin::run_timer_initialization_steps(TimerHandler 
 
     // 11. Let completionStep be an algorithm step which queues a global task on the timer task source given global to run task.
     Function<void()> completion_step = [this, task = move(task)]() mutable {
-        queue_global_task(Task::Source::TimerTask, this_impl(), [task] {
+        queue_global_task(Task::Source::TimerTask, this_impl(), JS::create_heap_function(this_impl().heap(), [task] {
             task->function()();
-        });
+        }));
     };
 
     // 12. Run steps after a timeout given global, "setTimeout/setInterval", timeout, completionStep, and id.
-    auto timer = Timer::create(this_impl(), timeout, move(completion_step), id);
-    m_timers.set(id, timer);
-    timer->start();
+    run_steps_after_a_timeout_impl(timeout, move(completion_step), id);
 
     // 13. Return id.
     return id;
@@ -474,7 +571,7 @@ void WindowOrWorkerGlobalScopeMixin::queue_the_performance_observer_task()
 
     // 3. Queue a task that consists of running the following substeps. The task source for the queued task is the performance
     //    timeline task source.
-    queue_global_task(Task::Source::PerformanceTimeline, this_impl(), [this]() {
+    queue_global_task(Task::Source::PerformanceTimeline, this_impl(), JS::create_heap_function(this_impl().heap(), [this]() {
         auto& realm = this_impl().realm();
 
         // 1. Unset performance observer task queued flag of relevantGlobal.
@@ -551,7 +648,98 @@ void WindowOrWorkerGlobalScopeMixin::queue_the_performance_observer_task()
             if (completion.is_abrupt())
                 HTML::report_exception(completion, realm);
         }
-    });
+    }));
+}
+
+void WindowOrWorkerGlobalScopeMixin::register_event_source(Badge<EventSource>, JS::NonnullGCPtr<EventSource> event_source)
+{
+    m_registered_event_sources.set(event_source);
+}
+
+void WindowOrWorkerGlobalScopeMixin::unregister_event_source(Badge<EventSource>, JS::NonnullGCPtr<EventSource> event_source)
+{
+    m_registered_event_sources.remove(event_source);
+}
+
+void WindowOrWorkerGlobalScopeMixin::forcibly_close_all_event_sources()
+{
+    for (auto event_source : m_registered_event_sources)
+        event_source->forcibly_close();
+}
+
+// https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#run-steps-after-a-timeout
+void WindowOrWorkerGlobalScopeMixin::run_steps_after_a_timeout(i32 timeout, Function<void()> completion_step)
+{
+    return run_steps_after_a_timeout_impl(timeout, move(completion_step));
+}
+
+void WindowOrWorkerGlobalScopeMixin::run_steps_after_a_timeout_impl(i32 timeout, Function<void()> completion_step, Optional<i32> timer_key)
+{
+    // 1. Assert: if timerKey is given, then the caller of this algorithm is the timer initialization steps. (Other specifications must not pass timerKey.)
+    // Note: This is enforced by the caller.
+
+    // 2. If timerKey is not given, then set it to a new unique non-numeric value.
+    if (!timer_key.has_value())
+        timer_key = m_timer_id_allocator.allocate();
+
+    // FIXME: 3. Let startTime be the current high resolution time given global.
+    auto timer = Timer::create(this_impl(), timeout, move(completion_step), timer_key.value());
+
+    // FIXME: 4. Set global's map of active timers[timerKey] to startTime plus milliseconds.
+    m_timers.set(timer_key.value(), timer);
+
+    // FIXME: 5. Run the following steps in parallel:
+    // FIXME:    1. If global is a Window object, wait until global's associated Document has been fully active for a further milliseconds milliseconds (not necessarily consecutively).
+    //              Otherwise, global is a WorkerGlobalScope object; wait until milliseconds milliseconds have passed with the worker not suspended (not necessarily consecutively).
+    // FIXME:    2. Wait until any invocations of this algorithm that had the same global and orderingIdentifier, that started before this one, and whose milliseconds is equal to or less than this one's, have completed.
+    // FIXME:    3. Optionally, wait a further implementation-defined length of time.
+    // FIXME:    4. Perform completionSteps.
+    // FIXME:    5. If timerKey is a non-numeric value, remove global's map of active timers[timerKey].
+
+    timer->start();
+}
+
+// https://w3c.github.io/hr-time/#dom-windoworworkerglobalscope-performance
+JS::NonnullGCPtr<HighResolutionTime::Performance> WindowOrWorkerGlobalScopeMixin::performance()
+{
+    auto& realm = this_impl().realm();
+    if (!m_performance)
+        m_performance = this_impl().heap().allocate<HighResolutionTime::Performance>(realm, realm);
+    return JS::NonnullGCPtr { *m_performance };
+}
+
+JS::NonnullGCPtr<IndexedDB::IDBFactory> WindowOrWorkerGlobalScopeMixin::indexed_db()
+{
+    auto& vm = this_impl().vm();
+    auto& realm = this_impl().realm();
+
+    if (!m_indexed_db)
+        m_indexed_db = vm.heap().allocate<IndexedDB::IDBFactory>(realm, realm);
+    return *m_indexed_db;
+}
+
+// https://w3c.github.io/performance-timeline/#dfn-frozen-array-of-supported-entry-types
+JS::NonnullGCPtr<JS::Object> WindowOrWorkerGlobalScopeMixin::supported_entry_types() const
+{
+    // Each global object has an associated frozen array of supported entry types, which is initialized to the
+    // FrozenArray created from the sequence of strings among the registry that are supported for the global
+    // object, in alphabetical order.
+    auto& vm = this_impl().vm();
+    auto& realm = this_impl().realm();
+
+    if (!m_supported_entry_types_array) {
+        Vector<JS::Value> supported_entry_types;
+
+#define __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES(entry_type, cpp_class) \
+    supported_entry_types.append(JS::PrimitiveString::create(vm, entry_type));
+        ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
+#undef __ENUMERATE_SUPPORTED_PERFORMANCE_ENTRY_TYPES
+
+        m_supported_entry_types_array = JS::Array::create_from(realm, supported_entry_types);
+        MUST(m_supported_entry_types_array->set_integrity_level(JS::Object::IntegrityLevel::Frozen));
+    }
+
+    return *m_supported_entry_types_array;
 }
 
 }

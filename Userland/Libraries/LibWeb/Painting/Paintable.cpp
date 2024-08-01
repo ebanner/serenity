@@ -16,6 +16,19 @@ Paintable::Paintable(Layout::Node const& layout_node)
     : m_layout_node(layout_node)
     , m_browsing_context(const_cast<HTML::BrowsingContext&>(layout_node.browsing_context()))
 {
+    auto& computed_values = layout_node.computed_values();
+    if (layout_node.is_grid_item() && computed_values.z_index().has_value()) {
+        // https://www.w3.org/TR/css-grid-2/#z-order
+        // grid items with z_index should behave as if position were "relative"
+        m_positioned = true;
+    } else {
+        m_positioned = computed_values.position() != CSS::Positioning::Static;
+    }
+
+    m_fixed_position = computed_values.position() == CSS::Positioning::Fixed;
+    m_absolutely_positioned = computed_values.position() == CSS::Positioning::Absolute;
+    m_floating = layout_node.is_floating();
+    m_inline = layout_node.is_inline();
 }
 
 Paintable::~Paintable()
@@ -35,17 +48,8 @@ void Paintable::visit_edges(Cell::Visitor& visitor)
 
 bool Paintable::is_visible() const
 {
-    return computed_values().visibility() == CSS::Visibility::Visible && computed_values().opacity() != 0;
-}
-
-bool Paintable::is_positioned() const
-{
-    if (layout_node().is_grid_item() && computed_values().z_index().has_value()) {
-        // https://www.w3.org/TR/css-grid-2/#z-order
-        // grid items with z_index should behave as if position were "relative"
-        return true;
-    }
-    return computed_values().position() != CSS::Positioning::Static;
+    auto const& computed_values = this->computed_values();
+    return computed_values.visibility() == CSS::Visibility::Visible && computed_values.opacity() != 0;
 }
 
 void Paintable::set_dom_node(JS::GCPtr<DOM::Node> dom_node)
@@ -98,9 +102,9 @@ bool Paintable::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, 
     return false;
 }
 
-Optional<HitTestResult> Paintable::hit_test(CSSPixelPoint, HitTestType) const
+TraversalDecision Paintable::hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const&) const
 {
-    return {};
+    return TraversalDecision::Continue;
 }
 
 StackingContext* Paintable::enclosing_stacking_context()
@@ -128,8 +132,6 @@ void Paintable::set_needs_display() const
     auto* containing_block = this->containing_block();
     if (!containing_block)
         return;
-    if (!containing_block->paintable_box())
-        return;
     auto navigable = this->navigable();
     if (!navigable)
         return;
@@ -140,25 +142,12 @@ void Paintable::set_needs_display() const
             navigable->set_needs_display(fragment.absolute_rect());
     }
 
-    if (!is<Painting::PaintableWithLines>(*containing_block->paintable_box()))
+    if (!is<Painting::PaintableWithLines>(*containing_block))
         return;
-    static_cast<Painting::PaintableWithLines const&>(*containing_block->paintable_box()).for_each_fragment([&](auto& fragment) {
+    static_cast<Painting::PaintableWithLines const&>(*containing_block).for_each_fragment([&](auto& fragment) {
         navigable->set_needs_display(fragment.absolute_rect());
         return IterationDecision::Continue;
     });
-}
-
-PaintableBox const* Paintable::nearest_scrollable_ancestor_within_stacking_context() const
-{
-    auto* ancestor = parent();
-    while (ancestor) {
-        if (ancestor->stacking_context())
-            return nullptr;
-        if (ancestor->is_paintable_box() && static_cast<PaintableBox const*>(ancestor)->has_scrollable_overflow())
-            return static_cast<PaintableBox const*>(ancestor);
-        ancestor = ancestor->parent();
-    }
-    return nullptr;
 }
 
 CSSPixelPoint Paintable::box_type_agnostic_position() const
@@ -171,18 +160,33 @@ CSSPixelPoint Paintable::box_type_agnostic_position() const
         auto const& inline_paintable = static_cast<Painting::InlinePaintable const&>(*this);
         if (!inline_paintable.fragments().is_empty())
             return inline_paintable.fragments().first().absolute_rect().location();
-        VERIFY_NOT_REACHED();
+        return inline_paintable.bounding_rect().location();
     }
 
     CSSPixelPoint position;
-    if (auto const* block = containing_block(); block && block->paintable() && is<Painting::PaintableWithLines>(*block->paintable())) {
-        static_cast<Painting::PaintableWithLines const&>(*block->paintable_box()).for_each_fragment([&](auto& fragment) {
+    if (auto const* block = containing_block(); block && is<Painting::PaintableWithLines>(*block)) {
+        static_cast<Painting::PaintableWithLines const&>(*block).for_each_fragment([&](auto& fragment) {
             position = fragment.absolute_rect().location();
             return IterationDecision::Break;
         });
     }
 
     return position;
+}
+
+Gfx::AffineTransform Paintable::compute_combined_css_transform() const
+{
+    Gfx::AffineTransform combined_transform;
+    if (is_paintable_box()) {
+        auto const& paintable_box = static_cast<PaintableBox const&>(*this);
+        auto affine_transform = Gfx::extract_2d_affine_transform(paintable_box.transform());
+        combined_transform = combined_transform.multiply(affine_transform);
+    }
+    for (auto const* ancestor = this->containing_block(); ancestor; ancestor = ancestor->containing_block()) {
+        auto affine_transform = Gfx::extract_2d_affine_transform(ancestor->transform());
+        combined_transform = combined_transform.multiply(affine_transform);
+    }
+    return combined_transform;
 }
 
 }

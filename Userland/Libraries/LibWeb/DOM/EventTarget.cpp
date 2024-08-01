@@ -38,6 +38,8 @@
 
 namespace Web::DOM {
 
+JS_DEFINE_ALLOCATOR(EventTarget);
+
 EventTarget::EventTarget(JS::Realm& realm, MayInterfereWithIndexedPropertyAccess may_interfere_with_indexed_property_access)
     : PlatformObject(realm, may_interfere_with_indexed_property_access)
 {
@@ -59,7 +61,7 @@ void EventTarget::initialize(JS::Realm& realm)
     // FIXME: We can't do this for HTML::Window or HTML::WorkerGlobalScope, as this will run when creating the initial global object.
     //        During this time, the ESO is not setup, so it will cause a nullptr dereference in host_defined_intrinsics.
     if (!is<HTML::WindowOrWorkerGlobalScopeMixin>(this))
-        set_prototype(&Bindings::ensure_web_prototype<Bindings::EventTargetPrototype>(realm, "EventTarget"_fly_string));
+        WEB_SET_PROTOTYPE_FOR_INTERFACE(EventTarget);
 }
 
 void EventTarget::visit_edges(Cell::Visitor& visitor)
@@ -67,11 +69,8 @@ void EventTarget::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
 
     if (auto const* data = m_data.ptr()) {
-        for (auto& event_listener : data->event_listener_list)
-            visitor.visit(event_listener);
-
-        for (auto& it : data->event_handler_map)
-            visitor.visit(it.value);
+        visitor.visit(data->event_listener_list);
+        visitor.visit(data->event_handler_map);
     }
 }
 
@@ -135,8 +134,8 @@ static FlattenedAddEventListenerOptions flatten_add_event_listener_options(Varia
         once = add_event_listener_options.once;
 
         // 2. If options["signal"] exists, then set signal to options["signal"].
-        if (add_event_listener_options.signal.has_value())
-            signal = add_event_listener_options.signal.value().ptr();
+        if (add_event_listener_options.signal)
+            signal = add_event_listener_options.signal;
     }
 
     // 5. Return capture, passive, once, and signal.
@@ -327,7 +326,7 @@ static EventTarget* determine_target_of_event_handler(EventTarget& event_target,
         return nullptr;
 
     // 4. Return eventTarget's node document's relevant global object.
-    return &event_target_element.document().window();
+    return &verify_cast<EventTarget>(HTML::relevant_global_object(event_target_element.document()));
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-attributes:event-handler-idl-attributes-2
@@ -486,7 +485,8 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
 
         //  6. Return scope. (NOTE: Not necessary)
 
-        auto function = JS::ECMAScriptFunctionObject::create(realm, name.to_deprecated_fly_string(), builder.to_byte_string(), program->body(), program->parameters(), program->function_length(), program->local_variables_names(), scope, nullptr, JS::FunctionKind::Normal, program->is_strict_mode(), program->might_need_arguments_object(), is_arrow_function);
+        auto function = JS::ECMAScriptFunctionObject::create(realm, name.to_deprecated_fly_string(), builder.to_byte_string(), program->body(), program->parameters(), program->function_length(), program->local_variables_names(), scope, nullptr, JS::FunctionKind::Normal, program->is_strict_mode(),
+            program->parsing_insights(), is_arrow_function);
 
         // 10. Remove settings object's realm execution context from the JavaScript execution context stack.
         VERIFY(vm.execution_context_stack().last() == &settings_object.realm_execution_context());
@@ -807,8 +807,8 @@ bool EventTarget::dispatch_event(Event& event)
             static_cast<HTML::Window*>(this)->set_last_activation_timestamp(current_time);
         } else if (is<DOM::Element>(this)) {
             auto const* element = static_cast<DOM::Element const*>(this);
-            auto& window = element->document().window();
-            window.set_last_activation_timestamp(current_time);
+            if (auto window = element->document().window())
+                window->set_last_activation_timestamp(current_time);
         }
     }
 

@@ -25,7 +25,7 @@ CharacterData::CharacterData(Document& document, NodeType type, String const& da
 void CharacterData::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CharacterDataPrototype>(realm, "CharacterData"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(CharacterData);
 }
 
 // https://dom.spec.whatwg.org/#dom-characterdata-data
@@ -98,7 +98,7 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     // 9. For each live range whose end node is node and end offset is greater than offset but less than or equal to offset plus count, set its end offset to offset.
     for (auto& range : Range::live_ranges()) {
         if (range->end_container() == this && range->end_offset() > offset && range->end_offset() <= (offset + count))
-            TRY(range->set_end(*range->end_container(), range->end_offset()));
+            TRY(range->set_end(*range->end_container(), offset));
     }
 
     // 10. For each live range whose start node is node and start offset is greater than offset plus count, increase its start offset by data’s length and decrease it by count.
@@ -123,7 +123,6 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     if (auto* layout_node = this->layout_node(); layout_node && layout_node->is_text_node())
         static_cast<Layout::TextNode&>(*layout_node).invalidate_text_for_rendering();
 
-    set_needs_style_update(true);
     document().set_needs_layout();
     return {};
 }

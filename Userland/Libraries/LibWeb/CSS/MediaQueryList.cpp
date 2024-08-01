@@ -33,7 +33,7 @@ MediaQueryList::MediaQueryList(DOM::Document& document, Vector<NonnullRefPtr<Med
 void MediaQueryList::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::MediaQueryListPrototype>(realm, "MediaQueryList"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(MediaQueryList);
 }
 
 void MediaQueryList::visit_edges(Cell::Visitor& visitor)
@@ -60,9 +60,13 @@ bool MediaQueryList::matches() const
 
 bool MediaQueryList::evaluate()
 {
+    auto window = m_document->window();
+    if (!window)
+        return false;
+
     bool now_matches = false;
     for (auto& media : m_media) {
-        now_matches = now_matches || media->evaluate(m_document->window());
+        now_matches = now_matches || media->evaluate(*window);
     }
 
     return now_matches;

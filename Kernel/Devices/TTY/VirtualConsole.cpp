@@ -285,7 +285,7 @@ ErrorOr<size_t> VirtualConsole::on_tty_write(UserOrKernelBuffer const& data, siz
 {
     SpinlockLocker global_lock(ConsoleManagement::the().tty_write_lock());
     auto result = data.read_buffered<512>(size, [&](ReadonlyBytes buffer) {
-        for (const auto& byte : buffer)
+        for (auto const& byte : buffer)
             m_console_impl.on_input(byte);
         return buffer.size();
     });
@@ -375,6 +375,11 @@ void VirtualConsole::terminal_did_resize(u16 columns, u16 rows)
 void VirtualConsole::terminal_history_changed(int)
 {
     // Do nothing, I guess?
+}
+
+void VirtualConsole::terminal_did_perform_possibly_partial_clear()
+{
+    // Do nothing, we're not going to hit this anyway.
 }
 
 void VirtualConsole::emit(u8 const* data, size_t size)

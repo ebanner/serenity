@@ -1,21 +1,23 @@
 /*
- * Copyright (c) 2023, Tim Flynn <trflynn89@serenityos.org>
+ * Copyright (c) 2023-2024, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/ByteString.h>
 #include <AK/String.h>
-#include <AK/URL.h>
 #include <Ladybird/Utilities.h>
 #include <LibCore/Resource.h>
 #include <LibGfx/ImageFormats/PNGWriter.h>
 #include <LibGfx/ShareableBitmap.h>
+#include <LibURL/URL.h>
+#include <LibWebView/ViewImplementation.h>
 
 #import <Application/ApplicationDelegate.h>
 #import <UI/Inspector.h>
 #import <UI/InspectorController.h>
 #import <UI/LadybirdWebView.h>
+#import <UI/SearchPanel.h>
 #import <UI/Tab.h>
 #import <UI/TabController.h>
 #import <Utilities/Conversions.h>
@@ -32,9 +34,9 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
 @property (nonatomic, strong) NSString* title;
 @property (nonatomic, strong) NSImage* favicon;
 
-@property (nonatomic, strong) InspectorController* inspector_controller;
+@property (nonatomic, strong) SearchPanel* search_panel;
 
-@property (nonatomic, assign) URL last_url;
+@property (nonatomic, strong) InspectorController* inspector_controller;
 
 @end
 
@@ -85,7 +87,10 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
         [self setTitleVisibility:NSWindowTitleHidden];
         [self setIsVisible:YES];
 
-        auto* scroll_view = [[NSScrollView alloc] initWithFrame:[self frame]];
+        self.search_panel = [[SearchPanel alloc] init];
+        [self.search_panel setHidden:YES];
+
+        auto* scroll_view = [[NSScrollView alloc] init];
         [scroll_view setHasVerticalScroller:YES];
         [scroll_view setHasHorizontalScroller:YES];
         [scroll_view setLineScroll:24];
@@ -93,19 +98,49 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
         [scroll_view setContentView:self.web_view];
         [scroll_view setDocumentView:[[NSView alloc] init]];
 
+        auto* stack_view = [NSStackView stackViewWithViews:@[
+            self.search_panel,
+            scroll_view,
+        ]];
+
+        [stack_view setOrientation:NSUserInterfaceLayoutOrientationVertical];
+        [stack_view setSpacing:0];
+
         [[NSNotificationCenter defaultCenter]
             addObserver:self
                selector:@selector(onContentScroll:)
                    name:NSViewBoundsDidChangeNotification
                  object:[scroll_view contentView]];
 
-        [self setContentView:scroll_view];
+        [self setContentView:stack_view];
+
+        [[self.search_panel leadingAnchor] constraintEqualToAnchor:[self.contentView leadingAnchor]].active = YES;
     }
 
     return self;
 }
 
 #pragma mark - Public methods
+
+- (void)find:(id)sender
+{
+    [self.search_panel find:sender];
+}
+
+- (void)findNextMatch:(id)sender
+{
+    [self.search_panel findNextMatch:sender];
+}
+
+- (void)findPreviousMatch:(id)sender
+{
+    [self.search_panel findPreviousMatch:sender];
+}
+
+- (void)useSelectionForFind:(id)sender
+{
+    [self.search_panel useSelectionForFind:sender];
+}
 
 - (void)tabWillClose
 {
@@ -181,6 +216,51 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     [[self tab] setAttributedTitle:title_and_favicon];
 }
 
+- (void)togglePageMuteState:(id)button
+{
+    auto& view = [[self web_view] view];
+    view.toggle_page_mute_state();
+
+    switch (view.audio_play_state()) {
+    case Web::HTML::AudioPlayState::Paused:
+        [[self tab] setAccessoryView:nil];
+        break;
+
+    case Web::HTML::AudioPlayState::Playing:
+        [button setImage:[self iconForPageMuteState]];
+        [button setToolTip:[self toolTipForPageMuteState]];
+        break;
+    }
+}
+
+- (NSImage*)iconForPageMuteState
+{
+    auto& view = [[self web_view] view];
+
+    switch (view.page_mute_state()) {
+    case Web::HTML::MuteState::Muted:
+        return [NSImage imageNamed:NSImageNameTouchBarAudioOutputVolumeOffTemplate];
+    case Web::HTML::MuteState::Unmuted:
+        return [NSImage imageNamed:NSImageNameTouchBarAudioOutputVolumeHighTemplate];
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+- (NSString*)toolTipForPageMuteState
+{
+    auto& view = [[self web_view] view];
+
+    switch (view.page_mute_state()) {
+    case Web::HTML::MuteState::Muted:
+        return @"Unmute tab";
+    case Web::HTML::MuteState::Unmuted:
+        return @"Mute tab";
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
 - (void)onContentScroll:(NSNotification*)notification
 {
     [[self web_view] handleScroll];
@@ -188,7 +268,7 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
 
 #pragma mark - LadybirdWebViewObserver
 
-- (String const&)onCreateNewTab:(URL const&)url
+- (String const&)onCreateNewTab:(URL::URL const&)url
                     activateTab:(Web::HTML::ActivateTab)activate_tab
 {
     auto* delegate = (ApplicationDelegate*)[NSApp delegate];
@@ -202,7 +282,7 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
 }
 
 - (String const&)onCreateNewTab:(StringView)html
-                            url:(URL const&)url
+                            url:(URL::URL const&)url
                     activateTab:(Web::HTML::ActivateTab)activate_tab
 {
     auto* delegate = (ApplicationDelegate*)[NSApp delegate];
@@ -216,22 +296,18 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     return [[tab web_view] handle];
 }
 
-- (void)loadURL:(URL const&)url
+- (void)loadURL:(URL::URL const&)url
 {
     [[self tabController] loadURL:url];
 }
 
-- (void)onLoadStart:(URL const&)url isRedirect:(BOOL)is_redirect
+- (void)onLoadStart:(URL::URL const&)url isRedirect:(BOOL)is_redirect
 {
-    if (url != self.last_url) {
-        self.last_url = url;
-    }
-
-    [[self tabController] onLoadStart:url isRedirect:is_redirect];
-
     self.title = Ladybird::string_to_ns_string(url.serialize());
     self.favicon = [Tab defaultFavicon];
     [self updateTabTitleAndFavicon];
+
+    [[self tabController] onLoadStart:url isRedirect:is_redirect];
 
     if (self.inspector_controller != nil) {
         auto* inspector = (Inspector*)[self.inspector_controller window];
@@ -239,12 +315,24 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     }
 }
 
-- (void)onLoadFinish:(URL const&)url
+- (void)onLoadFinish:(URL::URL const&)url
 {
     if (self.inspector_controller != nil) {
         auto* inspector = (Inspector*)[self.inspector_controller window];
         [inspector inspect];
     }
+}
+
+- (void)onURLChange:(URL::URL const&)url
+{
+    [[self tabController] onURLChange:url];
+}
+
+- (void)onBackNavigationEnabled:(BOOL)back_enabled
+       forwardNavigationEnabled:(BOOL)forward_enabled
+{
+    [[self tabController] onBackNavigationEnabled:back_enabled
+                         forwardNavigationEnabled:forward_enabled];
 }
 
 - (void)onTitleChange:(ByteString const&)title
@@ -275,19 +363,26 @@ static constexpr CGFloat const WINDOW_HEIGHT = 800;
     [self updateTabTitleAndFavicon];
 }
 
-- (void)onNavigateBack
+- (void)onAudioPlayStateChange:(Web::HTML::AudioPlayState)play_state
 {
-    [[self tabController] navigateBack:nil];
-}
+    auto& view = [[self web_view] view];
 
-- (void)onNavigateForward
-{
-    [[self tabController] navigateForward:nil];
-}
+    switch (play_state) {
+    case Web::HTML::AudioPlayState::Paused:
+        if (view.page_mute_state() == Web::HTML::MuteState::Unmuted) {
+            [[self tab] setAccessoryView:nil];
+        }
+        break;
 
-- (void)onReload
-{
-    [[self tabController] reload:nil];
+    case Web::HTML::AudioPlayState::Playing:
+        auto* button = [NSButton buttonWithImage:[self iconForPageMuteState]
+                                          target:self
+                                          action:@selector(togglePageMuteState:)];
+        [button setToolTip:[self toolTipForPageMuteState]];
+
+        [[self tab] setAccessoryView:button];
+        break;
+    }
 }
 
 #pragma mark - NSWindow

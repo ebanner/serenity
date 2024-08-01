@@ -38,7 +38,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     bool xz = false;
     bool no_auto_compress = false;
     StringView archive_file;
-    bool dereference;
+    bool dereference = false;
     StringView directory;
     Vector<ByteString> paths;
 
@@ -48,9 +48,9 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     args_parser.add_option(list, "List contents", "list", 't');
     args_parser.add_option(verbose, "Print paths", "verbose", 'v');
     args_parser.add_option(gzip, "Compress or decompress file using gzip", "gzip", 'z');
-    args_parser.add_option(lzma, "Compress or decompress file using lzma", "lzma", 0);
+    args_parser.add_option(lzma, "Compress or decompress file using lzma", "lzma");
     args_parser.add_option(xz, "Compress or decompress file using xz", "xz", 'J');
-    args_parser.add_option(no_auto_compress, "Do not use the archive suffix to select the compression algorithm", "no-auto-compress", 0);
+    args_parser.add_option(no_auto_compress, "Do not use the archive suffix to select the compression algorithm", "no-auto-compress");
     args_parser.add_option(directory, "Directory to extract to/create from", "directory", 'C', "DIRECTORY");
     args_parser.add_option(archive_file, "Archive file", "file", 'f', "FILE");
     args_parser.add_option(dereference, "Follow symlinks", "dereference", 'h');
@@ -72,10 +72,10 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     }
 
     if (list || extract) {
+        NonnullOwnPtr<Stream> input_stream = TRY(Core::InputBufferedFile::create(TRY(Core::File::open_file_or_standard_stream(archive_file, Core::File::OpenMode::Read))));
+
         if (!directory.is_empty())
             TRY(Core::System::chdir(directory));
-
-        NonnullOwnPtr<Stream> input_stream = TRY(Core::InputBufferedFile::create(TRY(Core::File::open_file_or_standard_stream(archive_file, Core::File::OpenMode::Read))));
 
         if (gzip)
             input_stream = make<Compress::GzipDecompressor>(move(input_stream));
@@ -251,7 +251,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             auto file = file_or_error.release_value();
 
             auto statbuf = TRY(Core::System::lstat(path));
-            auto canonicalized_path = TRY(String::from_byte_string(LexicalPath::canonicalized_path(path)));
+            auto canonicalized_path = LexicalPath::canonicalized_path(path);
             // FIXME: We should stream instead of reading the entire file in one go, but TarOutputStream does not have any interface to do so.
             auto file_content = TRY(file->read_until_eof());
             TRY(tar_stream.add_file(canonicalized_path, statbuf.st_mode, file_content));
@@ -264,7 +264,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         auto add_link = [&](ByteString path) -> ErrorOr<void> {
             auto statbuf = TRY(Core::System::lstat(path));
 
-            auto canonicalized_path = TRY(String::from_byte_string(LexicalPath::canonicalized_path(path)));
+            auto canonicalized_path = LexicalPath::canonicalized_path(path);
             TRY(tar_stream.add_link(canonicalized_path, statbuf.st_mode, TRY(Core::System::readlink(path))));
             if (verbose)
                 outln("{}", canonicalized_path);
@@ -275,7 +275,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         auto add_directory = [&](ByteString path, auto handle_directory) -> ErrorOr<void> {
             auto statbuf = TRY(Core::System::lstat(path));
 
-            auto canonicalized_path = TRY(String::from_byte_string(LexicalPath::canonicalized_path(path)));
+            auto canonicalized_path = LexicalPath::canonicalized_path(path);
             TRY(tar_stream.add_directory(canonicalized_path, statbuf.st_mode));
             if (verbose)
                 outln("{}", canonicalized_path);

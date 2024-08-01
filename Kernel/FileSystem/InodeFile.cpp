@@ -96,7 +96,9 @@ ErrorOr<NonnullOwnPtr<KString>> InodeFile::pseudo_path(OpenFileDescription const
 ErrorOr<void> InodeFile::truncate(u64 size)
 {
     TRY(m_inode->truncate(size));
-    TRY(m_inode->update_timestamps({}, {}, kgettimeofday()));
+    // FIXME: Make sure that the timestamps are updated by Inode::truncate for all filesystems before removing this.
+    auto truncated_at = kgettimeofday();
+    TRY(m_inode->update_timestamps({}, truncated_at, truncated_at));
     return {};
 }
 

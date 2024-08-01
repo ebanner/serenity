@@ -5,9 +5,9 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/SVGStopElementPrototype.h>
 #include <LibWeb/CSS/Parser/Parser.h>
-#include <LibWeb/CSS/StyleValues/IdentifierStyleValue.h>
-#include <LibWeb/Layout/BlockContainer.h>
+#include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/SVG/AttributeNames.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGStopElement.h>
@@ -62,13 +62,14 @@ float SVGStopElement::stop_opacity() const
 
 JS::NonnullGCPtr<SVGAnimatedNumber> SVGStopElement::offset() const
 {
-    TODO();
+    // FIXME: Implement this properly.
+    return SVGAnimatedNumber::create(realm(), 0, 0);
 }
 
 void SVGStopElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SVGStopElementPrototype>(realm, "SVGStopElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGStopElement);
 }
 
 }

@@ -20,14 +20,13 @@ JS::NonnullGCPtr<CSSKeyframesRule> CSSKeyframesRule::create(JS::Realm& realm, Fl
 void CSSKeyframesRule::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    for (auto& keyframe : m_keyframes)
-        visitor.visit(keyframe);
+    visitor.visit(m_keyframes);
 }
 
 void CSSKeyframesRule::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CSSKeyframesRulePrototype>(realm, "CSSKeyframesRule"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(CSSKeyframesRule);
 }
 
 String CSSKeyframesRule::serialized() const

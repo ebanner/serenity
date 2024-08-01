@@ -14,7 +14,6 @@
 #include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
 #include <AK/Try.h>
-#include <AK/URL.h>
 #include <Applications/FileManager/FileManagerWindowGML.h>
 #include <LibConfig/Client.h>
 #include <LibConfig/Listener.h>
@@ -49,6 +48,7 @@
 #include <LibGUI/Window.h>
 #include <LibGfx/Palette.h>
 #include <LibMain/Main.h>
+#include <LibURL/URL.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -171,7 +171,7 @@ void do_copy(Vector<ByteString> const& selected_file_paths, FileOperation file_o
         auto url = URL::create_with_file_scheme(path);
         copy_text.appendff("{}\n", url);
     }
-    GUI::Clipboard::the().set_data(copy_text.to_byte_string().bytes(), "text/uri-list");
+    GUI::Clipboard::the().set_data(copy_text.string_view().bytes(), "text/uri-list");
 }
 
 void do_paste(ByteString const& target_directory, GUI::Window* window)
@@ -197,7 +197,7 @@ void do_paste(ByteString const& target_directory, GUI::Window* window)
     for (auto& uri_as_string : copied_lines) {
         if (uri_as_string.is_empty())
             continue;
-        URL url = uri_as_string;
+        URL::URL url = uri_as_string;
         if (!url.is_valid() || url.scheme() != "file") {
             dbgln("Cannot paste URI {}", uri_as_string);
             continue;

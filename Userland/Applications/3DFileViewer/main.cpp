@@ -34,7 +34,7 @@ class GLContextWidget final : public GUI::Frame {
     C_OBJECT(GLContextWidget);
 
 public:
-    bool load_file(String const& filename, NonnullOwnPtr<Core::File> file);
+    bool load_file(ByteString const& filename, NonnullOwnPtr<Core::File> file);
     void toggle_rotate_x() { m_rotate_x = !m_rotate_x; }
     void toggle_rotate_y() { m_rotate_y = !m_rotate_y; }
     void toggle_rotate_z() { m_rotate_z = !m_rotate_z; }
@@ -289,9 +289,9 @@ void GLContextWidget::timer_event(Core::TimerEvent&)
     m_cycles++;
 }
 
-bool GLContextWidget::load_file(String const& filename, NonnullOwnPtr<Core::File> file)
+bool GLContextWidget::load_file(ByteString const& filename, NonnullOwnPtr<Core::File> file)
 {
-    if (!filename.bytes_as_string_view().ends_with(".obj"sv)) {
+    if (!filename.ends_with(".obj"sv)) {
         GUI::MessageBox::show(window(), ByteString::formatted("Opening \"{}\" failed: invalid file type", filename), "Error"sv, GUI::MessageBox::Type::Error);
         return false;
     }
@@ -304,7 +304,7 @@ bool GLContextWidget::load_file(String const& filename, NonnullOwnPtr<Core::File
 
     // Determine whether or not a texture for this model resides within the same directory
     StringBuilder builder;
-    builder.append(filename.bytes_as_string_view().split_view('.').at(0));
+    builder.append(filename.split_view('.').at(0));
     builder.append(".bmp"sv);
 
     // Attempt to open the texture file from disk

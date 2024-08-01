@@ -34,15 +34,14 @@ PerformanceObserver::~PerformanceObserver() = default;
 void PerformanceObserver::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::PerformanceObserverPrototype>(realm, "PerformanceObserver"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(PerformanceObserver);
 }
 
 void PerformanceObserver::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_callback);
-    for (auto& entry : m_observer_buffer)
-        visitor.visit(entry);
+    visitor.visit(m_observer_buffer);
 }
 
 // https://w3c.github.io/performance-timeline/#dom-performanceobserver-observe
@@ -216,6 +215,17 @@ Vector<JS::Handle<PerformanceTimeline::PerformanceEntry>> PerformanceObserver::t
         records.append(*record);
     m_observer_buffer.clear();
     return records;
+}
+
+// https://w3c.github.io/performance-timeline/#dom-performanceobserver-supportedentrytypes
+JS::NonnullGCPtr<JS::Object> PerformanceObserver::supported_entry_types(JS::VM& vm)
+{
+    // 1. Let globalObject be the environment settings object's global object.
+    auto* window_or_worker = dynamic_cast<HTML::WindowOrWorkerGlobalScopeMixin*>(&vm.get_global_object());
+    VERIFY(window_or_worker);
+
+    // 2. Return globalObject's frozen array of supported entry types.
+    return window_or_worker->supported_entry_types();
 }
 
 void PerformanceObserver::unset_requires_dropped_entries(Badge<HTML::WindowOrWorkerGlobalScopeMixin>)

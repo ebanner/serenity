@@ -217,12 +217,13 @@ class Symbol;
 class Token;
 class Utf16String;
 class VM;
+class PrototypeChainValidity;
 class Value;
 class WeakContainer;
 class WrappedFunction;
 enum class DeclarationKind;
 struct AlreadyResolved;
-struct JobCallback;
+class JobCallback;
 struct ModuleRequest;
 struct ModuleWithSpecifier;
 
@@ -288,11 +289,16 @@ namespace Temporal {
 JS_ENUMERATE_TEMPORAL_OBJECTS
 #undef __JS_ENUMERATE
 class Temporal;
+struct CalendarMethods;
 struct DurationRecord;
 struct DateDurationRecord;
 struct TimeDurationRecord;
+struct TimeZoneMethods;
 struct PartialDurationRecord;
 };
+
+template<typename T>
+class HeapFunction;
 
 template<typename T>
 requires(!IsLvalueReference<T>)
@@ -302,15 +308,19 @@ template<class T>
 class Handle;
 
 template<class T, size_t inline_capacity = 0>
+class ConservativeVector;
+
+template<class T, size_t inline_capacity = 0>
 class MarkedVector;
 
 namespace Bytecode {
 class BasicBlock;
-enum class Builtin;
+enum class Builtin : u8;
 class Executable;
 class Generator;
 class Instruction;
 class Interpreter;
+class Operand;
 class RegexTable;
 class Register;
 }

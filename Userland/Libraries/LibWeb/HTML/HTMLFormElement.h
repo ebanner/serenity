@@ -10,7 +10,6 @@
 
 #include <AK/Time.h>
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/HTML/AbstractBrowsingContext.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/Navigable.h>
@@ -59,6 +58,7 @@ public:
         UserNavigationInvolvement user_involvement = { UserNavigationInvolvement::None };
     };
     WebIDL::ExceptionOr<void> submit_form(JS::NonnullGCPtr<HTMLElement> submitter, SubmitFormOptions);
+    WebIDL::ExceptionOr<void> implicitly_submit_form();
 
     void reset_form();
 
@@ -66,12 +66,15 @@ public:
     WebIDL::ExceptionOr<void> submit();
 
     // NOTE: This is for the JS bindings. Use submit_form instead.
+    WebIDL::ExceptionOr<void> request_submit(JS::GCPtr<Element> submitter);
+
+    // NOTE: This is for the JS bindings. Use submit_form instead.
     void reset();
 
     void add_associated_element(Badge<FormAssociatedElement>, HTMLElement&);
     void remove_associated_element(Badge<FormAssociatedElement>, HTMLElement&);
 
-    ErrorOr<Vector<JS::NonnullGCPtr<DOM::Element>>> get_submittable_elements();
+    Vector<JS::NonnullGCPtr<DOM::Element>> get_submittable_elements();
 
     JS::NonnullGCPtr<DOM::HTMLFormControlsCollection> elements() const;
     unsigned length() const;
@@ -88,6 +91,8 @@ public:
 
     StringView method() const;
     WebIDL::ExceptionOr<void> set_method(String const&);
+
+    JS::NonnullGCPtr<DOM::DOMTokenList> rel_list();
 
     String action() const;
     WebIDL::ExceptionOr<void> set_action(String const&);
@@ -106,23 +111,26 @@ private:
     virtual Vector<FlyString> supported_property_names() const override;
     virtual bool is_supported_property_index(u32) const override;
 
-    ErrorOr<void> populate_vector_with_submittable_elements_in_tree_order(JS::NonnullGCPtr<DOM::Element> element, Vector<JS::NonnullGCPtr<DOM::Element>>& elements);
+    virtual void attribute_changed(FlyString const& name, Optional<String> const& value) override;
 
     ErrorOr<String> pick_an_encoding() const;
 
-    ErrorOr<void> mutate_action_url(AK::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
-    ErrorOr<void> submit_as_entity_body(AK::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
-    void get_action_url(AK::URL parsed_action, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
-    ErrorOr<void> mail_with_headers(AK::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
-    ErrorOr<void> mail_as_body(AK::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
-    void plan_to_navigate_to(AK::URL url, Variant<Empty, String, POSTResource> post_resource, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+    ErrorOr<void> mutate_action_url(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+    ErrorOr<void> submit_as_entity_body(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+    void get_action_url(URL::URL parsed_action, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+    ErrorOr<void> mail_with_headers(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+    ErrorOr<void> mail_as_body(URL::URL parsed_action, Vector<XHR::FormDataEntry> entry_list, EncodingTypeAttributeState encoding_type, String encoding, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+    void plan_to_navigate_to(URL::URL url, Variant<Empty, String, POSTResource> post_resource, JS::NonnullGCPtr<Navigable> target_navigable, Bindings::NavigationHistoryBehavior history_handling, UserNavigationInvolvement user_involvement);
+
+    FormAssociatedElement* default_button();
+    size_t number_of_fields_blocking_implicit_submission() const;
 
     bool m_firing_submission_events { false };
 
     // https://html.spec.whatwg.org/multipage/forms.html#locked-for-reset
     bool m_locked_for_reset { false };
 
-    Vector<JS::GCPtr<HTMLElement>> m_associated_elements;
+    Vector<JS::NonnullGCPtr<HTMLElement>> m_associated_elements;
 
     // https://html.spec.whatwg.org/multipage/forms.html#past-names-map
     struct PastNameEntry {
@@ -138,7 +146,9 @@ private:
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#planned-navigation
     // Each form element has a planned navigation, which is either null or a task; when the form is first created,
     // its planned navigation must be set to null.
-    Task const* m_planned_navigation { nullptr };
+    JS::GCPtr<Task const> m_planned_navigation;
+
+    JS::GCPtr<DOM::DOMTokenList> m_rel_list;
 };
 
 }

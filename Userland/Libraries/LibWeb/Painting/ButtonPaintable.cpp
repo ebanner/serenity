@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGUI/Event.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/Layout/ButtonBox.h>
@@ -12,6 +11,8 @@
 #include <LibWeb/Painting/ButtonPaintable.h>
 
 namespace Web::Painting {
+
+JS_DEFINE_ALLOCATOR(ButtonPaintable);
 
 JS::NonnullGCPtr<ButtonPaintable> ButtonPaintable::create(Layout::ButtonBox const& layout_box)
 {
@@ -60,7 +61,9 @@ void ButtonPaintable::paint(PaintContext& context, PaintPhase phase) const
         // Paint button text clipped to button rect
         auto& painter = context.recording_painter();
         painter.save();
-        painter.add_clip_rect(button_rect.to_type<int>());
+        auto clip_rect = absolute_rect();
+        clip_rect.translate_by(enclosing_scroll_frame_offset().value_or({}));
+        painter.add_clip_rect(context.enclosing_device_rect(clip_rect).to_type<int>());
         painter.draw_text(
             text_rect.to_type<int>(),
             static_cast<HTML::HTMLInputElement const&>(dom_node).value(),

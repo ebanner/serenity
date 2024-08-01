@@ -17,12 +17,14 @@ namespace Web::HTML::EventNames {
 #define ENUMERATE_HTML_EVENTS                        \
     __ENUMERATE_HTML_EVENT(abort)                    \
     __ENUMERATE_HTML_EVENT(addtrack)                 \
+    __ENUMERATE_HTML_EVENT(animationcancel)          \
     __ENUMERATE_HTML_EVENT(animationend)             \
     __ENUMERATE_HTML_EVENT(animationiteration)       \
     __ENUMERATE_HTML_EVENT(animationstart)           \
     __ENUMERATE_HTML_EVENT(afterprint)               \
     __ENUMERATE_HTML_EVENT(beforeprint)              \
     __ENUMERATE_HTML_EVENT(beforeunload)             \
+    __ENUMERATE_HTML_EVENT(blocked)                  \
     __ENUMERATE_HTML_EVENT(blur)                     \
     __ENUMERATE_HTML_EVENT(cancel)                   \
     __ENUMERATE_HTML_EVENT(canplay)                  \
@@ -30,6 +32,7 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(change)                   \
     __ENUMERATE_HTML_EVENT(click)                    \
     __ENUMERATE_HTML_EVENT(close)                    \
+    __ENUMERATE_HTML_EVENT(complete)                 \
     __ENUMERATE_HTML_EVENT(connect)                  \
     __ENUMERATE_HTML_EVENT(contextmenu)              \
     __ENUMERATE_HTML_EVENT(copy)                     \
@@ -49,7 +52,10 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(emptied)                  \
     __ENUMERATE_HTML_EVENT(ended)                    \
     __ENUMERATE_HTML_EVENT(error)                    \
+    __ENUMERATE_HTML_EVENT(finish)                   \
     __ENUMERATE_HTML_EVENT(focus)                    \
+    __ENUMERATE_HTML_EVENT(focusin)                  \
+    __ENUMERATE_HTML_EVENT(focusout)                 \
     __ENUMERATE_HTML_EVENT(formdata)                 \
     __ENUMERATE_HTML_EVENT(hashchange)               \
     __ENUMERATE_HTML_EVENT(input)                    \
@@ -60,6 +66,9 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(loadend)                  \
     __ENUMERATE_HTML_EVENT(loadeddata)               \
     __ENUMERATE_HTML_EVENT(loadedmetadata)           \
+    __ENUMERATE_HTML_EVENT(loading)                  \
+    __ENUMERATE_HTML_EVENT(loadingdone)              \
+    __ENUMERATE_HTML_EVENT(loadingerror)             \
     __ENUMERATE_HTML_EVENT(loadstart)                \
     __ENUMERATE_HTML_EVENT(message)                  \
     __ENUMERATE_HTML_EVENT(messageerror)             \
@@ -80,12 +89,14 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(ratechange)               \
     __ENUMERATE_HTML_EVENT(readystatechange)         \
     __ENUMERATE_HTML_EVENT(rejectionhandled)         \
+    __ENUMERATE_HTML_EVENT(remove)                   \
     __ENUMERATE_HTML_EVENT(removetrack)              \
     __ENUMERATE_HTML_EVENT(reset)                    \
     __ENUMERATE_HTML_EVENT(resize)                   \
     __ENUMERATE_HTML_EVENT(scroll)                   \
     __ENUMERATE_HTML_EVENT(scrollend)                \
     __ENUMERATE_HTML_EVENT(securitypolicyviolation)  \
+    __ENUMERATE_HTML_EVENT(selectionchange)          \
     __ENUMERATE_HTML_EVENT(seeked)                   \
     __ENUMERATE_HTML_EVENT(seeking)                  \
     __ENUMERATE_HTML_EVENT(select)                   \
@@ -94,12 +105,14 @@ namespace Web::HTML::EventNames {
     __ENUMERATE_HTML_EVENT(statechange)              \
     __ENUMERATE_HTML_EVENT(storage)                  \
     __ENUMERATE_HTML_EVENT(submit)                   \
+    __ENUMERATE_HTML_EVENT(success)                  \
     __ENUMERATE_HTML_EVENT(suspend)                  \
     __ENUMERATE_HTML_EVENT(timeupdate)               \
     __ENUMERATE_HTML_EVENT(toggle)                   \
     __ENUMERATE_HTML_EVENT(transitionend)            \
     __ENUMERATE_HTML_EVENT(unhandledrejection)       \
     __ENUMERATE_HTML_EVENT(unload)                   \
+    __ENUMERATE_HTML_EVENT(upgradeneeded)            \
     __ENUMERATE_HTML_EVENT(visibilitychange)         \
     __ENUMERATE_HTML_EVENT(volumechange)             \
     __ENUMERATE_HTML_EVENT(waiting)                  \

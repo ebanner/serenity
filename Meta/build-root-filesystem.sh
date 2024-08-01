@@ -110,6 +110,10 @@ if [ -f mnt/usr/Tests/Kernel/TestProcFSWrite ]; then
     chown 0:0 mnt/usr/Tests/Kernel/TestProcFSWrite
     chmod 4755 mnt/usr/Tests/Kernel/TestProcFSWrite
 fi
+if [ -f mnt/usr/Tests/Kernel/TestLoopDevice ]; then
+    chown 0:0 mnt/usr/Tests/Kernel/TestLoopDevice
+    chmod 4755 mnt/usr/Tests/Kernel/TestLoopDevice
+fi
 
 if [ -f mnt/res/kernel.map ]; then
     chmod 0400 mnt/res/kernel.map
@@ -160,6 +164,8 @@ mkdir -p mnt/root
 mkdir -p mnt/home/anon
 mkdir -p mnt/home/anon/Desktop
 mkdir -p mnt/home/anon/Downloads
+mkdir -p mnt/home/anon/Music
+mkdir -p mnt/home/anon/Pictures
 mkdir -p mnt/home/nona
 # FIXME: Handle these test copies using CMake install rules
 rm -fr mnt/home/anon/Tests/js-tests mnt/home/anon/Tests/cpp-tests
@@ -188,7 +194,7 @@ chown -R 200:100 mnt/home/nona
 echo "done"
 
 printf "adding some desktop icons... "
-ln -sf /bin/Browser mnt/home/anon/Desktop/Ladybird
+ln -sf /bin/Browser mnt/home/anon/Desktop/
 ln -sf /bin/TextEditor mnt/home/anon/Desktop/Text\ Editor
 ln -sf /bin/Help mnt/home/anon/Desktop/
 ln -sf /home/anon mnt/home/anon/Desktop/Home

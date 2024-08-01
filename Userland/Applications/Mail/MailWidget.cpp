@@ -160,7 +160,7 @@ ErrorOr<bool> MailWidget::connect_and_login()
 
     auto& list_items = response.data().list_items();
 
-    m_statusbar->set_text(String::formatted("Loaded {} mailboxes", list_items.size()).release_value_but_fixme_should_propagate_errors());
+    m_statusbar->set_text(MUST(String::formatted("Loaded {} mailboxes", list_items.size())));
 
     m_account_holder = AccountHolder::create();
     m_account_holder->add_account_with_name_and_mailboxes(username, move(list_items));
@@ -475,7 +475,7 @@ void MailWidget::selected_email_to_load(GUI::ModelIndex const& index)
 
     auto& body_data = fetch_response_data.body_data();
     auto body_text_part_iterator = body_data.find_if([](Tuple<IMAP::FetchCommand::DataItem, ByteString>& data) {
-        const auto data_item = data.get<0>();
+        auto const data_item = data.get<0>();
         return data_item.section.has_value() && data_item.section->type == IMAP::FetchCommand::DataItem::SectionType::Parts;
     });
     VERIFY(body_text_part_iterator != body_data.end());

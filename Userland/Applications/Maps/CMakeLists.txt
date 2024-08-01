@@ -11,6 +11,7 @@ compile_gml(SearchPanel.gml SearchPanelGML.cpp)
 set(SOURCES
     main.cpp
     FavoritesEditDialogGML.cpp
+    FavoritesModel.cpp
     FavoritesPanelGML.cpp
     FavoritesPanel.cpp
     MapWidget.cpp
@@ -20,4 +21,4 @@ set(SOURCES
 )
 
 serenity_app(Maps ICON app-maps)
-target_link_libraries(Maps PRIVATE LibConfig LibCore LibDesktop LibGfx LibGUI LibMain LibProtocol)
+target_link_libraries(Maps PRIVATE LibConfig LibCore LibDesktop LibGfx LibGUI LibMain LibProtocol LibURL)

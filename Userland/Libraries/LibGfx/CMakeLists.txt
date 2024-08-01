@@ -36,17 +36,22 @@ set(SOURCES
     ICC/Tags.cpp
     ICC/TagTypes.cpp
     ICC/WellKnownProfiles.cpp
+    ImageFormats/AnimationWriter.cpp
     ImageFormats/BMPLoader.cpp
     ImageFormats/BMPWriter.cpp
     ImageFormats/BooleanDecoder.cpp
     ImageFormats/CCITTDecoder.cpp
     ImageFormats/DDSLoader.cpp
     ImageFormats/GIFLoader.cpp
+    ImageFormats/GIFWriter.cpp
     ImageFormats/ICOLoader.cpp
     ImageFormats/ILBMLoader.cpp
     ImageFormats/ImageDecoder.cpp
     ImageFormats/ISOBMFF/Boxes.cpp
+    ImageFormats/ISOBMFF/JPEG2000Boxes.cpp
     ImageFormats/ISOBMFF/Reader.cpp
+    ImageFormats/JBIG2Loader.cpp
+    ImageFormats/JPEG2000Loader.cpp
     ImageFormats/JPEGLoader.cpp
     ImageFormats/JPEGXLLoader.cpp
     ImageFormats/JPEGWriter.cpp
@@ -55,7 +60,9 @@ set(SOURCES
     ImageFormats/PNGLoader.cpp
     ImageFormats/PNGWriter.cpp
     ImageFormats/PortableFormatWriter.cpp
+    ImageFormats/PAMLoader.cpp
     ImageFormats/PPMLoader.cpp
+    ImageFormats/QMArithmeticDecoder.cpp
     ImageFormats/QOILoader.cpp
     ImageFormats/QOIWriter.cpp
     ImageFormats/TGALoader.cpp
@@ -64,10 +71,15 @@ set(SOURCES
     ImageFormats/WebPLoader.cpp
     ImageFormats/WebPLoaderLossless.cpp
     ImageFormats/WebPLoaderLossy.cpp
+    ImageFormats/WebPSharedLossless.cpp
+    ImageFormats/WebPWriter.cpp
+    ImageFormats/WebPWriterLossless.cpp
     ImmutableBitmap.cpp
+    MedianCut.cpp
     Painter.cpp
     Palette.cpp
     Path.cpp
+    PathClipper.cpp
     Point.cpp
     Rect.cpp
     ShareableBitmap.cpp
@@ -82,16 +94,16 @@ set(SOURCES
 )
 
 serenity_lib(LibGfx gfx)
-target_link_libraries(LibGfx PRIVATE LibCompress LibCore LibCrypto LibFileSystem LibRIFF LibTextCodec LibIPC LibUnicode)
+target_link_libraries(LibGfx PRIVATE LibCompress LibCore LibCrypto LibFileSystem LibRIFF LibTextCodec LibIPC LibUnicode LibURL)
 
 set(generated_sources TIFFMetadata.h TIFFTagHandler.cpp)
 list(TRANSFORM generated_sources PREPEND "ImageFormats/")
 
-find_package(Python COMPONENTS Interpreter REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 add_custom_command(
         OUTPUT  ${generated_sources}
-        COMMAND ${Python_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/TIFFGenerator.py" -o "${CMAKE_CURRENT_BINARY_DIR}/ImageFormats"
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/TIFFGenerator.py" -o "${CMAKE_CURRENT_BINARY_DIR}/ImageFormats"
         DEPENDS "TIFFGenerator.py"
         VERBATIM
 )

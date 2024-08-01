@@ -50,6 +50,12 @@ ByteString Handler::to_details_str() const
     auto obj = MUST(JsonObjectSerializer<>::try_create(builder));
     MUST(obj.add("executable"sv, executable));
     MUST(obj.add("name"sv, name));
+
+    auto arguments = MUST(obj.add_array("arguments"sv));
+    for (auto const& argument : this->arguments)
+        MUST(arguments.add(argument));
+    MUST(arguments.finish());
+
     switch (handler_type) {
     case Type::Application:
         MUST(obj.add("type"sv, "app"));
@@ -63,6 +69,7 @@ ByteString Handler::to_details_str() const
     default:
         break;
     }
+
     MUST(obj.finish());
     return builder.to_byte_string();
 }
@@ -84,6 +91,7 @@ void Launcher::load_handlers(ByteString const& af_dir)
     Desktop::AppFile::for_each([&](auto af) {
         auto app_name = af->name();
         auto app_executable = af->executable();
+        auto app_arguments = af->arguments();
         HashTable<ByteString> mime_types;
         for (auto& mime_type : af->launcher_mime_types())
             mime_types.set(mime_type);
@@ -94,7 +102,7 @@ void Launcher::load_handlers(ByteString const& af_dir)
         for (auto& protocol : af->launcher_protocols())
             protocols.set(protocol);
         if (access(app_executable.characters(), X_OK) == 0)
-            m_handlers.set(app_executable, { Handler::Type::Default, app_name, app_executable, mime_types, file_types, protocols });
+            m_handlers.set(app_executable, { Handler::Type::Default, app_name, app_executable, move(app_arguments), mime_types, file_types, protocols });
     },
         af_dir);
 }
@@ -137,7 +145,7 @@ bool Launcher::has_mime_handlers(ByteString const& mime_type)
     return false;
 }
 
-Vector<ByteString> Launcher::handlers_for_url(const URL& url)
+Vector<ByteString> Launcher::handlers_for_url(const URL::URL& url)
 {
     Vector<ByteString> handlers;
     if (url.scheme() == "file") {
@@ -157,7 +165,7 @@ Vector<ByteString> Launcher::handlers_for_url(const URL& url)
     return handlers;
 }
 
-Vector<ByteString> Launcher::handlers_with_details_for_url(const URL& url)
+Vector<ByteString> Launcher::handlers_with_details_for_url(const URL::URL& url)
 {
     Vector<ByteString> handlers;
     if (url.scheme() == "file") {
@@ -186,7 +194,7 @@ Optional<StringView> Launcher::mime_type_for_file(ByteString path)
     return Core::guess_mime_type_based_on_sniffed_bytes(*file_or_error.release_value());
 }
 
-bool Launcher::open_url(const URL& url, ByteString const& handler_name)
+bool Launcher::open_url(const URL::URL& url, ByteString const& handler_name)
 {
     if (!handler_name.is_empty())
         return open_with_handler_name(url, handler_name);
@@ -197,7 +205,7 @@ bool Launcher::open_url(const URL& url, ByteString const& handler_name)
     return open_with_user_preferences(m_protocol_handlers, url.scheme().to_byte_string(), { url.to_byte_string() });
 }
 
-bool Launcher::open_with_handler_name(const URL& url, ByteString const& handler_name)
+bool Launcher::open_with_handler_name(const URL::URL& url, ByteString const& handler_name)
 {
     auto handler_optional = m_handlers.get(handler_name);
     if (!handler_optional.has_value())
@@ -346,7 +354,7 @@ void Launcher::for_each_handler_for_path(ByteString const& path, Function<bool(H
     });
 }
 
-bool Launcher::open_file_url(const URL& url)
+bool Launcher::open_file_url(const URL::URL& url)
 {
     struct stat st;
     auto file_path = url.serialize_path();

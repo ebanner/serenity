@@ -17,20 +17,20 @@ JS_DEFINE_ALLOCATOR(JavaScriptModuleScript);
 
 ModuleScript::~ModuleScript() = default;
 
-ModuleScript::ModuleScript(AK::URL base_url, ByteString filename, EnvironmentSettingsObject& environment_settings_object)
+ModuleScript::ModuleScript(URL::URL base_url, ByteString filename, EnvironmentSettingsObject& environment_settings_object)
     : Script(move(base_url), move(filename), environment_settings_object)
 {
 }
 
 JavaScriptModuleScript::~JavaScriptModuleScript() = default;
 
-JavaScriptModuleScript::JavaScriptModuleScript(AK::URL base_url, ByteString filename, EnvironmentSettingsObject& environment_settings_object)
+JavaScriptModuleScript::JavaScriptModuleScript(URL::URL base_url, ByteString filename, EnvironmentSettingsObject& environment_settings_object)
     : ModuleScript(move(base_url), move(filename), environment_settings_object)
 {
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#creating-a-javascript-module-script
-WebIDL::ExceptionOr<JS::GCPtr<JavaScriptModuleScript>> JavaScriptModuleScript::create(ByteString const& filename, StringView source, EnvironmentSettingsObject& settings_object, AK::URL base_url)
+WebIDL::ExceptionOr<JS::GCPtr<JavaScriptModuleScript>> JavaScriptModuleScript::create(ByteString const& filename, StringView source, EnvironmentSettingsObject& settings_object, URL::URL base_url)
 {
     // 1. If scripting is disabled for settings, then set source to the empty string.
     if (settings_object.is_scripting_disabled())
@@ -59,10 +59,10 @@ WebIDL::ExceptionOr<JS::GCPtr<JavaScriptModuleScript>> JavaScriptModuleScript::c
     // 8. If result is a list of errors, then:
     if (result.is_error()) {
         auto& parse_error = result.error().first();
-        dbgln("JavaScriptModuleScript: Failed to parse: {}", parse_error.to_byte_string());
+        dbgln("JavaScriptModuleScript: Failed to parse: {}", parse_error.to_string());
 
         // 1. Set script's parse error to result[0].
-        script->set_parse_error(JS::SyntaxError::create(settings_object.realm(), parse_error.to_string().release_value_but_fixme_should_propagate_errors()));
+        script->set_parse_error(JS::SyntaxError::create(settings_object.realm(), parse_error.to_string()));
 
         // 2. Return script.
         return script;
@@ -148,7 +148,7 @@ JS::Promise* JavaScriptModuleScript::run(PreventErrorReporting)
         VERIFY(record);
 
         // NON-STANDARD: To ensure that LibJS can find the module on the stack, we push a new execution context.
-        auto module_execution_context = JS::ExecutionContext::create(heap());
+        auto module_execution_context = JS::ExecutionContext::create();
         module_execution_context->realm = &settings.realm();
         module_execution_context->script_or_module = JS::NonnullGCPtr<JS::Module> { *record };
         vm().push_execution_context(*module_execution_context);

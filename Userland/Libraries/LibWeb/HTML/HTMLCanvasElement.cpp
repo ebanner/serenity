@@ -11,6 +11,7 @@
 #include <LibGfx/ImageFormats/JPEGWriter.h>
 #include <LibGfx/ImageFormats/PNGWriter.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
+#include <LibWeb/Bindings/HTMLCanvasElementPrototype.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/IdentifierStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RatioStyleValue.h>
@@ -40,7 +41,7 @@ HTMLCanvasElement::~HTMLCanvasElement() = default;
 void HTMLCanvasElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLCanvasElementPrototype>(realm, "HTMLCanvasElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLCanvasElement);
 }
 
 void HTMLCanvasElement::visit_edges(Cell::Visitor& visitor)
@@ -275,7 +276,7 @@ String HTMLCanvasElement::to_data_url(StringView type, Optional<double> quality)
     if (base64_encoded_or_error.is_error()) {
         return "data:,"_string;
     }
-    return MUST(AK::URL::create_with_data(file.value().mime_type, base64_encoded_or_error.release_value(), true).to_string());
+    return MUST(URL::create_with_data(file.value().mime_type, base64_encoded_or_error.release_value(), true).to_string());
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-toblob

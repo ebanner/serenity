@@ -16,6 +16,7 @@
 #include <LibWeb/Internals/Internals.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/ViewportPaintable.h>
 
 namespace Web::Internals {
 
@@ -31,7 +32,7 @@ Internals::~Internals() = default;
 void Internals::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    Object::set_prototype(&Bindings::ensure_web_prototype<Bindings::InternalsPrototype>(realm, "Internals"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Internals);
 }
 
 void Internals::signal_text_test_is_done()
@@ -82,10 +83,28 @@ void Internals::click(double x, double y)
     page.handle_mouseup({ x, y }, { x, y }, 1, 0, 0);
 }
 
+void Internals::move_pointer_to(double x, double y)
+{
+    auto& page = global_object().browsing_context()->page();
+    page.handle_mousemove({ x, y }, { x, y }, 0, 0);
+}
+
+void Internals::wheel(double x, double y, double delta_x, double delta_y)
+{
+    auto& page = global_object().browsing_context()->page();
+    page.handle_mousewheel({ x, y }, { x, y }, 0, 0, 0, delta_x, delta_y);
+}
+
 WebIDL::ExceptionOr<bool> Internals::dispatch_user_activated_event(DOM::EventTarget& target, DOM::Event& event)
 {
     event.set_is_trusted(true);
     return target.dispatch_event(event);
+}
+
+JS::NonnullGCPtr<InternalAnimationTimeline> Internals::create_internal_animation_timeline()
+{
+    auto& realm = this->realm();
+    return realm.heap().allocate<InternalAnimationTimeline>(realm, realm);
 }
 
 }

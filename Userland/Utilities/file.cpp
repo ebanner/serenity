@@ -33,7 +33,7 @@ static ErrorOr<Optional<String>> image_details(StringView description, StringVie
 {
     auto mapped_file = TRY(Core::MappedFile::map(path));
     auto mime_type = Core::guess_mime_type_based_on_filename(path);
-    auto image_decoder = Gfx::ImageDecoder::try_create_for_raw_bytes(mapped_file->bytes(), mime_type);
+    auto image_decoder = TRY(Gfx::ImageDecoder::try_create_for_raw_bytes(mapped_file->bytes(), mime_type));
     if (!image_decoder)
         return OptionalNone {};
 
@@ -168,17 +168,17 @@ static constexpr Array s_pattern_with_specialized_functions {
 
 static ErrorOr<Optional<String>> get_description_from_mime_type(StringView mime, StringView path)
 {
-    auto const description = Core::get_description_from_mime_type(mime);
+    auto const mime_type = Core::get_mime_type_data(mime);
 
-    if (!description.has_value())
+    if (!mime_type.has_value())
         return OptionalNone {};
 
     for (auto const& pattern : s_pattern_with_specialized_functions) {
         if (mime.matches(pattern.matching_pattern))
-            return pattern.details(*description, path);
+            return pattern.details(mime_type->description, path);
     }
 
-    return description_only(*description, path);
+    return description_only(mime_type->description, path);
 }
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)

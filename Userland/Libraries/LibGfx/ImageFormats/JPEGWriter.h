@@ -12,6 +12,7 @@
 namespace Gfx {
 
 struct JPEGEncoderOptions {
+    Optional<ReadonlyBytes> icc_data;
     u8 quality { 75 };
 };
 
@@ -20,6 +21,7 @@ public:
     using Options = JPEGEncoderOptions;
 
     static ErrorOr<void> encode(Stream&, Bitmap const&, Options const& = {});
+    static ErrorOr<void> encode(Stream&, CMYKBitmap const&, Options const& = {});
 
 private:
     JPEGWriter() = delete;

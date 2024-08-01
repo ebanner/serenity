@@ -61,6 +61,10 @@ public:
         : m_ref(move(ref))
     {
     }
+    explicit Reference()
+        : m_ref(Reference::Null { ValueType(ValueType::Kind::FunctionReference) })
+    {
+    }
 
     auto& ref() const { return m_ref; }
 
@@ -370,7 +374,7 @@ using FunctionInstance = Variant<WasmFunction, HostFunction>;
 
 class TableInstance {
 public:
-    explicit TableInstance(TableType const& type, Vector<Optional<Reference>> elements)
+    explicit TableInstance(TableType const& type, Vector<Reference> elements)
         : m_elements(move(elements))
         , m_type(type)
     {
@@ -380,14 +384,17 @@ public:
     auto& elements() { return m_elements; }
     auto& type() const { return m_type; }
 
-    bool grow(size_t size_to_grow, Reference const& fill_value)
+    bool grow(u32 size_to_grow, Reference const& fill_value)
     {
         if (size_to_grow == 0)
             return true;
-        auto new_size = m_elements.size() + size_to_grow;
+        size_t new_size = m_elements.size() + size_to_grow;
         if (auto max = m_type.limits().max(); max.has_value()) {
             if (max.value() < new_size)
                 return false;
+        }
+        if (new_size >= NumericLimits<u32>::max()) {
+            return false;
         }
         auto previous_size = m_elements.size();
         if (m_elements.try_resize(new_size).is_error())
@@ -398,8 +405,8 @@ public:
     }
 
 private:
-    Vector<Optional<Reference>> m_elements;
-    TableType const& m_type;
+    Vector<Reference> m_elements;
+    TableType m_type;
 };
 
 class MemoryInstance {
@@ -459,7 +466,7 @@ private:
     {
     }
 
-    MemoryType const& m_type;
+    MemoryType m_type;
     size_t m_size { 0 };
     ByteBuffer m_data;
 };
@@ -604,7 +611,7 @@ private:
     Vector<EntryType, 1024> m_data;
 };
 
-using InstantiationResult = AK::Result<NonnullOwnPtr<ModuleInstance>, InstantiationError>;
+using InstantiationResult = AK::ErrorOr<NonnullOwnPtr<ModuleInstance>, InstantiationError>;
 
 class AbstractMachine {
 public:
@@ -655,7 +662,7 @@ public:
         return m_unresolved_imports;
     }
 
-    AK::Result<Vector<ExternValue>, LinkError> finish();
+    AK::ErrorOr<Vector<ExternValue>, LinkError> finish();
 
 private:
     void populate();

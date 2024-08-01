@@ -19,20 +19,21 @@ struct WorkerOptions {
 };
 
 class WorkerAgent : public JS::Cell {
-    JS_CELL(Agent, JS::Cell);
+    JS_CELL(WorkerAgent, JS::Cell);
     JS_DECLARE_ALLOCATOR(WorkerAgent);
 
-    WorkerAgent(AK::URL url, WorkerOptions const& options, JS::GCPtr<MessagePort> outside_port);
+    WorkerAgent(URL::URL url, WorkerOptions const& options, JS::GCPtr<MessagePort> outside_port, JS::NonnullGCPtr<EnvironmentSettingsObject> outside_settings);
 
 private:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
     WorkerOptions m_worker_options;
-    AK::URL m_url;
+    URL::URL m_url;
 
     JS::GCPtr<MessagePort> m_message_port;
     JS::GCPtr<MessagePort> m_outside_port;
+    JS::NonnullGCPtr<EnvironmentSettingsObject> m_outside_settings;
 
     RefPtr<Web::HTML::WebWorkerClient> m_worker_ipc;
 };

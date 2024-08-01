@@ -208,14 +208,12 @@ ErrorOr<void> MainWidget::initialize_menubar(GUI::Window& window)
         auto* editor = current_image_editor();
         VERIFY(editor);
         editor->save_project_as();
-        GUI::Application::the()->set_most_recently_open_file(editor->path());
     });
 
     m_save_image_action = GUI::CommonActions::make_save_action([&](auto&) {
         auto* editor = current_image_editor();
         VERIFY(editor);
         editor->save_project();
-        GUI::Application::the()->set_most_recently_open_file(editor->path());
     });
 
     file_menu->add_action(*m_new_image_action);
@@ -1304,11 +1302,11 @@ void MainWidget::open_image(FileSystemAccessClient::File file)
     auto& image = *m_loader.release_image();
     auto& editor = create_new_editor(image);
     editor.set_loaded_from_image(m_loader.is_raw_image());
-    editor.set_path(file.filename().to_byte_string());
+    editor.set_path(file.filename());
     editor.set_unmodified();
     m_layer_list_widget->set_image(&image);
     m_toolbox->ensure_tool_selection();
-    GUI::Application::the()->set_most_recently_open_file(file.filename().to_byte_string());
+    GUI::Application::the()->set_most_recently_open_file(file.filename());
 }
 
 ErrorOr<void> MainWidget::create_default_image()
@@ -1425,7 +1423,7 @@ ImageEditor& MainWidget::create_new_editor(NonnullRefPtr<Image> image)
     };
 
     image_editor.on_scale_change = Core::debounce(100, [this](float scale) {
-        m_zoom_combobox->set_text(ByteString::formatted("{}%", roundf(scale * 100)));
+        m_zoom_combobox->set_text(ByteString::formatted("{}%", roundf(scale * 100)), GUI::AllowCallback::No);
         current_image_editor()->update_tool_cursor();
     });
 
@@ -1440,6 +1438,9 @@ ImageEditor& MainWidget::create_new_editor(NonnullRefPtr<Image> image)
         m_palette_widget->set_secondary_color(color);
         if (image_editor.active_tool())
             image_editor.active_tool()->on_secondary_color_change(color);
+    };
+    image_editor.on_file_saved = [](ByteString const& filename) {
+        GUI::Application::the()->set_most_recently_open_file(filename);
     };
 
     if (image->layer_count())

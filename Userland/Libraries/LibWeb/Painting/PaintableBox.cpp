@@ -6,6 +6,7 @@
  */
 
 #include <AK/GenericShorthands.h>
+#include <LibGfx/Font/ScaledFont.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/DOM/Document.h>
@@ -16,6 +17,7 @@
 #include <LibWeb/Painting/FilterPainting.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/StackingContext.h>
+#include <LibWeb/Painting/TextPaintable.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/FontPlugin.h>
 
@@ -65,6 +67,18 @@ CSSPixelPoint PaintableBox::scroll_offset() const
 
 void PaintableBox::set_scroll_offset(CSSPixelPoint offset)
 {
+    auto scrollable_overflow_rect = this->scrollable_overflow_rect();
+    if (!scrollable_overflow_rect.has_value())
+        return;
+
+    document().set_needs_to_refresh_clip_state(true);
+    document().set_needs_to_refresh_scroll_state(true);
+
+    auto max_x_offset = scrollable_overflow_rect->width() - content_size().width();
+    auto max_y_offset = scrollable_overflow_rect->height() - content_size().height();
+    offset.set_x(clamp(offset.x(), 0, max_x_offset));
+    offset.set_y(clamp(offset.y(), 0, max_y_offset));
+
     // FIXME: If there is horizontal and vertical scroll ignore only part of the new offset
     if (offset.y() < 0 || scroll_offset() == offset)
         return;
@@ -80,20 +94,32 @@ void PaintableBox::set_scroll_offset(CSSPixelPoint offset)
         return;
     }
 
+    // https://drafts.csswg.org/cssom-view-1/#scrolling-events
+    // Whenever an element gets scrolled (whether in response to user interaction or by an API),
+    // the user agent must run these steps:
+
+    // 1. Let doc be the element’s node document.
+    auto& document = layout_box().document();
+
+    // FIXME: 2. If the element is a snap container, run the steps to update snapchanging targets for the element with
+    //           the element’s eventual snap target in the block axis as newBlockTarget and the element’s eventual snap
+    //           target in the inline axis as newInlineTarget.
+
+    JS::NonnullGCPtr<DOM::EventTarget> const event_target = *dom_node();
+
+    // 3. If the element is already in doc’s pending scroll event targets, abort these steps.
+    if (document.pending_scroll_event_targets().contains_slow(event_target))
+        return;
+
+    // 4. Append the element to doc’s pending scroll event targets.
+    document.pending_scroll_event_targets().append(*layout_box().dom_node());
+
     set_needs_display();
 }
 
 void PaintableBox::scroll_by(int delta_x, int delta_y)
 {
-    auto scrollable_overflow_rect = this->scrollable_overflow_rect();
-    if (!scrollable_overflow_rect.has_value())
-        return;
-    auto max_x_offset = scrollable_overflow_rect->width() - content_size().width();
-    auto max_y_offset = scrollable_overflow_rect->height() - content_size().height();
-    auto current_offset = scroll_offset();
-    auto new_offset_x = clamp(current_offset.x() + delta_x, 0, max_x_offset);
-    auto new_offset_y = clamp(current_offset.y() + delta_y, 0, max_y_offset);
-    set_scroll_offset({ new_offset_x, new_offset_y });
+    set_scroll_offset(scroll_offset().translated(delta_x, delta_y));
 }
 
 void PaintableBox::set_offset(CSSPixelPoint offset)
@@ -115,9 +141,25 @@ CSSPixelPoint PaintableBox::offset() const
 CSSPixelRect PaintableBox::compute_absolute_rect() const
 {
     CSSPixelRect rect { offset(), content_size() };
-    for (auto const* block = containing_block(); block && block->paintable(); block = block->paintable()->containing_block())
-        rect.translate_by(block->paintable_box()->offset());
+    for (auto const* block = containing_block(); block; block = block->containing_block())
+        rect.translate_by(block->offset());
     return rect;
+}
+
+CSSPixelRect PaintableBox::compute_absolute_padding_rect_with_css_transform_applied() const
+{
+    auto rect = absolute_rect();
+    auto scroll_offset = this->enclosing_scroll_frame_offset();
+    if (scroll_offset.has_value())
+        rect.translate_by(scroll_offset.value());
+    rect.translate_by(combined_css_transform().translation().to_type<CSSPixels>());
+
+    CSSPixelRect padding_rect;
+    padding_rect.set_x(rect.x() - box_model().padding.left);
+    padding_rect.set_width(content_width() + box_model().padding.left + box_model().padding.right);
+    padding_rect.set_y(rect.y() - box_model().padding.top);
+    padding_rect.set_height(content_height() + box_model().padding.top + box_model().padding.bottom);
+    return padding_rect;
 }
 
 CSSPixelRect PaintableBox::absolute_rect() const
@@ -170,11 +212,8 @@ void PaintableBox::before_paint(PaintContext& context, [[maybe_unused]] PaintPha
     if (!is_visible())
         return;
 
-    auto clip_rect = get_clip_rect();
-    if (clip_rect.has_value()) {
-        context.recording_painter().save();
-        context.recording_painter().add_clip_rect(clip_rect->to_type<int>());
-    }
+    apply_clip_overflow_rect(context, phase);
+    apply_scroll_offset(context, phase);
 }
 
 void PaintableBox::after_paint(PaintContext& context, [[maybe_unused]] PaintPhase phase) const
@@ -182,8 +221,54 @@ void PaintableBox::after_paint(PaintContext& context, [[maybe_unused]] PaintPhas
     if (!is_visible())
         return;
 
-    if (get_clip_rect().has_value())
-        context.recording_painter().restore();
+    reset_scroll_offset(context, phase);
+    clear_clip_overflow_rect(context, phase);
+}
+
+bool PaintableBox::is_scrollable(ScrollDirection direction) const
+{
+    auto overflow = direction == ScrollDirection::Horizontal ? computed_values().overflow_x() : computed_values().overflow_y();
+    auto scrollable_overflow_size = direction == ScrollDirection::Horizontal ? scrollable_overflow_rect()->width() : scrollable_overflow_rect()->height();
+    auto scrollport_size = direction == ScrollDirection::Horizontal ? absolute_padding_box_rect().width() : absolute_padding_box_rect().height();
+    if (overflow == CSS::Overflow::Auto)
+        return scrollable_overflow_size > scrollport_size;
+    return overflow == CSS::Overflow::Scroll;
+}
+
+static constexpr CSSPixels scrollbar_thumb_thickness = 8;
+
+Optional<CSSPixelRect> PaintableBox::scroll_thumb_rect(ScrollDirection direction) const
+{
+    if (!is_scrollable(direction))
+        return {};
+
+    auto padding_rect = absolute_padding_box_rect();
+    auto scrollable_overflow_rect = this->scrollable_overflow_rect().value();
+    auto scroll_overflow_size = direction == ScrollDirection::Horizontal ? scrollable_overflow_rect.width() : scrollable_overflow_rect.height();
+    auto scrollport_size = direction == ScrollDirection::Horizontal ? padding_rect.width() : padding_rect.height();
+    auto scroll_offset = direction == ScrollDirection::Horizontal ? this->scroll_offset().x() : this->scroll_offset().y();
+    if (scroll_overflow_size == 0)
+        return {};
+
+    auto thumb_size = scrollport_size * (scrollport_size / scroll_overflow_size);
+    CSSPixels thumb_position = 0;
+    if (scroll_overflow_size > scrollport_size)
+        thumb_position = scroll_offset * (scrollport_size - thumb_size) / (scroll_overflow_size - scrollport_size);
+
+    if (direction == ScrollDirection::Horizontal) {
+        return CSSPixelRect {
+            padding_rect.left() + thumb_position,
+            padding_rect.bottom() - scrollbar_thumb_thickness,
+            thumb_size,
+            scrollbar_thumb_thickness
+        };
+    }
+    return CSSPixelRect {
+        padding_rect.right() - scrollbar_thumb_thickness,
+        padding_rect.top() + thumb_position,
+        scrollbar_thumb_thickness,
+        thumb_size
+    };
 }
 
 void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
@@ -202,10 +287,9 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
     }
 
     if (phase == PaintPhase::Outline) {
-        auto outline_width = computed_values().outline_width().to_px(layout_node());
-        auto borders_data = borders_data_for_outline(layout_node(), computed_values().outline_color(), computed_values().outline_style(), outline_width);
-        if (borders_data.has_value()) {
-            auto outline_offset = computed_values().outline_offset().to_px(layout_node());
+        auto const& outline_data = this->outline_data();
+        if (outline_data.has_value()) {
+            auto outline_offset = this->outline_offset();
             auto border_radius_data = normalized_border_radii_data(ShrinkRadiiForBorders::No);
             auto borders_rect = absolute_border_box_rect();
 
@@ -222,10 +306,24 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
             if ((borders_rect.height() / 2) + outline_offset_y < 0)
                 outline_offset_y = -borders_rect.height() / 2;
 
-            border_radius_data.inflate(outline_width + outline_offset_y, outline_width + outline_offset_x, outline_width + outline_offset_y, outline_width + outline_offset_x);
-            borders_rect.inflate(outline_width + outline_offset_y, outline_width + outline_offset_x, outline_width + outline_offset_y, outline_width + outline_offset_x);
+            border_radius_data.inflate(outline_data->top.width + outline_offset_y, outline_data->right.width + outline_offset_x, outline_data->bottom.width + outline_offset_y, outline_data->left.width + outline_offset_x);
+            borders_rect.inflate(outline_data->top.width + outline_offset_y, outline_data->right.width + outline_offset_x, outline_data->bottom.width + outline_offset_y, outline_data->left.width + outline_offset_x);
 
-            context.recording_painter().paint_borders(context.rounded_device_rect(borders_rect), border_radius_data.as_corners(context), borders_data->to_device_pixels(context));
+            paint_all_borders(context.recording_painter(), context.rounded_device_rect(borders_rect), border_radius_data.as_corners(context), outline_data->to_device_pixels(context));
+        }
+    }
+
+    auto scrollbar_width = computed_values().scrollbar_width();
+    if (!layout_box().is_viewport() && phase == PaintPhase::Overlay && scrollbar_width != CSS::ScrollbarWidth::None) {
+        auto color = Color(Color::NamedColor::DarkGray).with_alpha(128);
+        int thumb_corner_radius = static_cast<int>(context.rounded_device_pixels(scrollbar_thumb_thickness / 2));
+        if (auto thumb_rect = scroll_thumb_rect(ScrollDirection::Horizontal); thumb_rect.has_value()) {
+            auto thumb_device_rect = context.enclosing_device_rect(thumb_rect.value());
+            context.recording_painter().fill_rect_with_rounded_corners(thumb_device_rect.to_type<int>(), color, thumb_corner_radius, thumb_corner_radius, thumb_corner_radius, thumb_corner_radius);
+        }
+        if (auto thumb_rect = scroll_thumb_rect(ScrollDirection::Vertical); thumb_rect.has_value()) {
+            auto thumb_device_rect = context.enclosing_device_rect(thumb_rect.value());
+            context.recording_painter().fill_rect_with_rounded_corners(thumb_device_rect.to_type<int>(), color, thumb_corner_radius, thumb_corner_radius, thumb_corner_radius, thumb_corner_radius);
         }
     }
 
@@ -292,7 +390,7 @@ void PaintableBox::paint_border(PaintContext& context) const
         .bottom = box_model().border.bottom == 0 ? CSS::BorderData() : computed_values().border_bottom(),
         .left = box_model().border.left == 0 ? CSS::BorderData() : computed_values().border_left(),
     };
-    context.recording_painter().paint_borders(context.rounded_device_rect(absolute_border_box_rect()), normalized_border_radii_data().as_corners(context), borders_data.to_device_pixels(context));
+    paint_all_borders(context.recording_painter(), context.rounded_device_rect(absolute_border_box_rect()), normalized_border_radii_data().as_corners(context), borders_data.to_device_pixels(context));
 }
 
 void PaintableBox::paint_backdrop_filter(PaintContext& context) const
@@ -357,128 +455,82 @@ BorderRadiiData PaintableBox::normalized_border_radii_data(ShrinkRadiiForBorders
     return border_radii_data;
 }
 
-Optional<CSSPixelRect> PaintableBox::calculate_overflow_clipped_rect() const
-{
-    if (layout_node().is_viewport()) {
-        return {};
-    }
-
-    if (!m_clip_rect.has_value()) {
-        // NOTE: stacking context should not be crossed while aggregating rectangle to
-        // clip `overflow: hidden` because intersecting rectangles with different
-        // transforms doesn't make sense
-        // TODO: figure out if there are cases when stacking context should be
-        // crossed to calculate correct clip rect
-        if (!stacking_context() && containing_block() && containing_block()->paintable_box()) {
-            m_clip_rect = containing_block()->paintable_box()->calculate_overflow_clipped_rect();
-        }
-
-        auto overflow_x = computed_values().overflow_x();
-        auto overflow_y = computed_values().overflow_y();
-
-        if (overflow_x != CSS::Overflow::Visible && overflow_y != CSS::Overflow::Visible) {
-            if (m_clip_rect.has_value()) {
-                m_clip_rect->intersect(absolute_padding_box_rect());
-            } else {
-                m_clip_rect = absolute_padding_box_rect();
-            }
-        }
-    }
-
-    return m_clip_rect;
-}
-
 void PaintableBox::apply_scroll_offset(PaintContext& context, PaintPhase) const
 {
-    if (context.scroll_frames().contains(this)) {
+    if (scroll_frame_id().has_value()) {
         context.recording_painter().save();
-        context.recording_painter().set_scroll_frame_id(context.scroll_frames().get(this)->id);
+        context.recording_painter().set_scroll_frame_id(scroll_frame_id().value());
     }
 }
 
 void PaintableBox::reset_scroll_offset(PaintContext& context, PaintPhase) const
 {
-    if (context.scroll_frames().contains(this)) {
+    if (scroll_frame_id().has_value())
         context.recording_painter().restore();
-    }
 }
 
 void PaintableBox::apply_clip_overflow_rect(PaintContext& context, PaintPhase phase) const
 {
-    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::Foreground))
+    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::Foreground, PaintPhase::Outline))
         return;
 
-    // FIXME: Support more overflow variations.
-    auto clip_rect = this->calculate_overflow_clipped_rect();
-    auto overflow_x = computed_values().overflow_x();
-    auto overflow_y = computed_values().overflow_y();
-
-    auto css_clip_property = get_clip_rect();
-    if (css_clip_property.has_value()) {
-        if (clip_rect.has_value())
-            clip_rect->intersect(css_clip_property.value());
-        else
-            clip_rect = css_clip_property.value();
-    }
-
-    if (!clip_rect.has_value())
-        return;
-
-    if (!m_clipping_overflow) {
-        context.recording_painter().save();
-        context.recording_painter().add_clip_rect(context.enclosing_device_rect(*clip_rect).to_type<int>());
+    if (clip_rect().has_value()) {
+        auto overflow_clip_rect = clip_rect().value();
         m_clipping_overflow = true;
-    }
-
-    if (!clip_rect->is_empty() && overflow_y == CSS::Overflow::Hidden && overflow_x == CSS::Overflow::Hidden) {
-        auto border_radii_data = normalized_border_radii_data(ShrinkRadiiForBorders::Yes);
-        CornerRadii corner_radii {
-            .top_left = border_radii_data.top_left.as_corner(context),
-            .top_right = border_radii_data.top_right.as_corner(context),
-            .bottom_right = border_radii_data.bottom_right.as_corner(context),
-            .bottom_left = border_radii_data.bottom_left.as_corner(context)
-        };
-        if (corner_radii.has_any_radius()) {
-            VERIFY(!m_corner_clipper_id.has_value());
-            m_corner_clipper_id = context.allocate_corner_clipper_id();
-            context.recording_painter().sample_under_corners(*m_corner_clipper_id, corner_radii, context.rounded_device_rect(*clip_rect).to_type<int>(), CornerClip::Outside);
+        context.recording_painter().save();
+        context.recording_painter().add_clip_rect(context.enclosing_device_rect(overflow_clip_rect).to_type<int>());
+        auto const& border_radii_clips = this->border_radii_clips();
+        m_corner_clipper_ids.resize(border_radii_clips.size());
+        auto const& combined_transform = combined_css_transform();
+        for (size_t corner_clip_index = 0; corner_clip_index < border_radii_clips.size(); ++corner_clip_index) {
+            auto const& corner_clip = border_radii_clips[corner_clip_index];
+            auto corners = corner_clip.radii.as_corners(context);
+            if (!corners.has_any_radius())
+                continue;
+            auto corner_clipper_id = context.allocate_corner_clipper_id();
+            m_corner_clipper_ids[corner_clip_index] = corner_clipper_id;
+            auto rect = corner_clip.rect.translated(-combined_transform.translation().to_type<CSSPixels>());
+            context.recording_painter().sample_under_corners(corner_clipper_id, corner_clip.radii.as_corners(context), context.rounded_device_rect(rect).to_type<int>(), CornerClip::Outside);
         }
     }
 }
 
 void PaintableBox::clear_clip_overflow_rect(PaintContext& context, PaintPhase phase) const
 {
-    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::Foreground))
+    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::Foreground, PaintPhase::Outline))
         return;
 
-    // FIXME: Support more overflow variations.
     if (m_clipping_overflow) {
-        context.recording_painter().restore();
         m_clipping_overflow = false;
-    }
-    if (m_corner_clipper_id.has_value()) {
-        VERIFY(m_corner_clipper_id.has_value());
-        auto clip_rect = this->calculate_overflow_clipped_rect();
-        context.recording_painter().blit_corner_clipping(*m_corner_clipper_id, context.rounded_device_rect(*clip_rect).to_type<int>());
-        m_corner_clipper_id = {};
+        auto const& border_radii_clips = this->border_radii_clips();
+        for (int corner_clip_index = border_radii_clips.size() - 1; corner_clip_index >= 0; --corner_clip_index) {
+            auto const& corner_clip = border_radii_clips[corner_clip_index];
+            auto corners = corner_clip.radii.as_corners(context);
+            if (!corners.has_any_radius())
+                continue;
+            auto corner_clipper_id = m_corner_clipper_ids[corner_clip_index];
+            m_corner_clipper_ids[corner_clip_index] = corner_clipper_id;
+            context.recording_painter().blit_corner_clipping(corner_clipper_id);
+        }
+        context.recording_painter().restore();
     }
 }
 
-void paint_cursor_if_needed(PaintContext& context, Layout::TextNode const& text_node, PaintableFragment const& fragment)
+void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
 {
-    auto const& browsing_context = text_node.browsing_context();
+    auto const& navigable = *paintable.navigable();
 
-    if (!browsing_context.is_focused_context())
+    if (!navigable.is_focused())
         return;
 
-    if (!browsing_context.cursor_blink_state())
+    if (!navigable.cursor_blink_state())
         return;
 
-    if (browsing_context.cursor_position()->node() != &text_node.dom_node())
+    if (navigable.cursor_position()->node() != paintable.dom_node())
         return;
 
     // NOTE: This checks if the cursor is before the start or after the end of the fragment. If it is at the end, after all text, it should still be painted.
-    if (browsing_context.cursor_position()->offset() < (unsigned)fragment.start() || browsing_context.cursor_position()->offset() > (unsigned)(fragment.start() + fragment.length()))
+    if (navigable.cursor_position()->offset() < (unsigned)fragment.start() || navigable.cursor_position()->offset() > (unsigned)(fragment.start() + fragment.length()))
         return;
 
     if (!fragment.layout_node().dom_node() || !fragment.layout_node().dom_node()->is_editable())
@@ -486,9 +538,9 @@ void paint_cursor_if_needed(PaintContext& context, Layout::TextNode const& text_
 
     auto fragment_rect = fragment.absolute_rect();
 
-    auto text = text_node.text_for_rendering().bytes_as_string_view().substring_view(fragment.start(), fragment.length());
+    auto text = fragment.string_view();
     CSSPixelRect cursor_rect {
-        fragment_rect.x() + CSSPixels::nearest_value_for(text_node.first_available_font().width(text.substring_view(0, text_node.browsing_context().cursor_position()->offset() - fragment.start()))),
+        fragment_rect.x() + CSSPixels::nearest_value_for(paintable.layout_node().first_available_font().width(text.substring_view(0, navigable.cursor_position()->offset() - fragment.start()))),
         fragment_rect.top(),
         1,
         fragment_rect.height()
@@ -496,29 +548,22 @@ void paint_cursor_if_needed(PaintContext& context, Layout::TextNode const& text_
 
     auto cursor_device_rect = context.rounded_device_rect(cursor_rect).to_type<int>();
 
-    context.recording_painter().draw_rect(cursor_device_rect, text_node.computed_values().color());
+    context.recording_painter().draw_rect(cursor_device_rect, paintable.computed_values().color());
 }
 
-void paint_text_decoration(PaintContext& context, Layout::Node const& text_node, PaintableFragment const& fragment)
+void paint_text_decoration(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
 {
     auto& painter = context.recording_painter();
     auto& font = fragment.layout_node().first_available_font();
     auto fragment_box = fragment.absolute_rect();
     CSSPixels glyph_height = CSSPixels::nearest_value_for(font.pixel_size());
-    auto baseline = fragment_box.height() / 2 - (glyph_height + 4) / 2 + glyph_height;
+    auto baseline = fragment.baseline();
 
-    auto line_color = text_node.computed_values().text_decoration_color();
+    auto line_color = paintable.computed_values().text_decoration_color();
+    auto const& text_paintable = static_cast<TextPaintable const&>(fragment.paintable());
+    auto device_line_thickness = context.rounded_device_pixels(text_paintable.text_decoration_thickness());
 
-    CSSPixels css_line_thickness = [&] {
-        CSS::Length computed_thickness = text_node.computed_values().text_decoration_thickness().resolved(text_node, CSS::Length(1, CSS::Length::Type::Em).to_px(text_node));
-        if (computed_thickness.is_auto())
-            return max(glyph_height.scaled(0.1), 1);
-
-        return computed_thickness.to_px(text_node);
-    }();
-    auto device_line_thickness = context.rounded_device_pixels(css_line_thickness);
-
-    auto text_decoration_lines = text_node.computed_values().text_decoration_line();
+    auto text_decoration_lines = paintable.computed_values().text_decoration_line();
     for (auto line : text_decoration_lines) {
         DevicePixelPoint line_start_point {};
         DevicePixelPoint line_end_point {};
@@ -545,7 +590,7 @@ void paint_text_decoration(PaintContext& context, Layout::Node const& text_node,
             return;
         }
 
-        switch (text_node.computed_values().text_decoration_style()) {
+        switch (paintable.computed_values().text_decoration_style()) {
         case CSS::TextDecorationStyle::Solid:
             painter.draw_line(line_start_point.to_type<int>(), line_end_point.to_type<int>(), line_color, device_line_thickness.value(), Gfx::Painter::LineStyle::Solid);
             break;
@@ -581,7 +626,7 @@ void paint_text_decoration(PaintContext& context, Layout::Node const& text_node,
     }
 }
 
-void paint_text_fragment(PaintContext& context, Layout::TextNode const& text_node, PaintableFragment const& fragment, PaintPhase phase)
+void paint_text_fragment(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment, PaintPhase phase)
 {
     auto& painter = context.recording_painter();
 
@@ -589,33 +634,25 @@ void paint_text_fragment(PaintContext& context, Layout::TextNode const& text_nod
         auto fragment_absolute_rect = fragment.absolute_rect();
         auto fragment_absolute_device_rect = context.enclosing_device_rect(fragment_absolute_rect);
 
-        if (text_node.document().inspected_layout_node() == &text_node)
+        if (paintable.document().inspected_layout_node() == &paintable.layout_node())
             context.recording_painter().draw_rect(fragment_absolute_device_rect.to_type<int>(), Color::Magenta);
 
-        auto text = text_node.text_for_rendering();
+        auto text = paintable.text_for_rendering();
 
         DevicePixelPoint baseline_start { fragment_absolute_device_rect.x(), fragment_absolute_device_rect.y() + context.rounded_device_pixels(fragment.baseline()) };
-        Vector<Gfx::DrawGlyphOrEmoji> scaled_glyph_run;
-        scaled_glyph_run.ensure_capacity(fragment.glyph_run().size());
-        for (auto glyph : fragment.glyph_run()) {
-            glyph.visit([&](auto& glyph) {
-                glyph.font = *glyph.font->with_size(glyph.font->point_size() * static_cast<float>(context.device_pixels_per_css_pixel()));
-                glyph.position = glyph.position.scaled(context.device_pixels_per_css_pixel());
-            });
-            scaled_glyph_run.append(move(glyph));
-        }
-        painter.draw_text_run(baseline_start.to_type<int>(), scaled_glyph_run, text_node.computed_values().color(), fragment_absolute_device_rect.to_type<int>());
+        auto scale = context.device_pixels_per_css_pixel();
+        painter.draw_text_run(baseline_start.to_type<int>(), fragment.glyph_run(), paintable.computed_values().color(), fragment_absolute_device_rect.to_type<int>(), scale);
 
-        auto selection_rect = context.enclosing_device_rect(fragment.selection_rect(text_node.first_available_font())).to_type<int>();
+        auto selection_rect = context.enclosing_device_rect(fragment.selection_rect(paintable.layout_node().first_available_font())).to_type<int>();
         if (!selection_rect.is_empty()) {
             painter.fill_rect(selection_rect, CSS::SystemColor::highlight());
             RecordingPainterStateSaver saver(painter);
             painter.add_clip_rect(selection_rect);
-            painter.draw_text_run(baseline_start.to_type<int>(), scaled_glyph_run, CSS::SystemColor::highlight_text(), fragment_absolute_device_rect.to_type<int>());
+            painter.draw_text_run(baseline_start.to_type<int>(), fragment.glyph_run(), CSS::SystemColor::highlight_text(), fragment_absolute_device_rect.to_type<int>(), scale);
         }
 
-        paint_text_decoration(context, text_node, fragment);
-        paint_cursor_if_needed(context, text_node, fragment);
+        paint_text_decoration(context, paintable, fragment);
+        paint_cursor_if_needed(context, paintable, fragment);
     }
 }
 
@@ -632,14 +669,18 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
     bool should_clip_overflow = computed_values().overflow_x() != CSS::Overflow::Visible && computed_values().overflow_y() != CSS::Overflow::Visible;
     Optional<u32> corner_clip_id;
 
-    auto clip_box = context.rounded_device_rect(absolute_padding_box_rect());
-
+    auto clip_box = absolute_padding_box_rect();
+    if (get_clip_rect().has_value()) {
+        clip_box.intersect(get_clip_rect().value());
+        should_clip_overflow = true;
+    }
     if (should_clip_overflow) {
         context.recording_painter().save();
         // FIXME: Handle overflow-x and overflow-y being different values.
-        context.recording_painter().add_clip_rect(clip_box.to_type<int>());
-        auto scroll_offset = context.rounded_device_point(this->scroll_offset());
-        context.recording_painter().translate(-scroll_offset.to_type<int>());
+        auto clip_box_with_enclosing_scroll_frame_offset = clip_box;
+        if (enclosing_scroll_frame_offset().has_value())
+            clip_box_with_enclosing_scroll_frame_offset.translate_by(enclosing_scroll_frame_offset().value());
+        context.recording_painter().add_clip_rect(context.rounded_device_rect(clip_box_with_enclosing_scroll_frame_offset).to_type<int>());
 
         auto border_radii = normalized_border_radii_data(ShrinkRadiiForBorders::Yes);
         CornerRadii corner_radii {
@@ -650,8 +691,12 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
         };
         if (corner_radii.has_any_radius()) {
             corner_clip_id = context.allocate_corner_clipper_id();
-            context.recording_painter().sample_under_corners(*corner_clip_id, corner_radii, clip_box.to_type<int>(), CornerClip::Outside);
+            context.recording_painter().sample_under_corners(*corner_clip_id, corner_radii, context.rounded_device_rect(clip_box).to_type<int>(), CornerClip::Outside);
         }
+
+        context.recording_painter().save();
+        auto scroll_offset = context.rounded_device_point(this->scroll_offset());
+        context.recording_painter().translate(-scroll_offset.to_type<int>());
     }
 
     // Text shadows
@@ -660,15 +705,11 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
     // FIXME: Find a smarter way to do this?
     if (phase == PaintPhase::Foreground) {
         for (auto& fragment : fragments()) {
-            if (fragment.contained_by_inline_node())
-                continue;
             paint_text_shadow(context, fragment, fragment.shadows());
         }
     }
 
     for (auto const& fragment : m_fragments) {
-        if (fragment.contained_by_inline_node())
-            continue;
         auto fragment_absolute_rect = fragment.absolute_rect();
         auto fragment_absolute_device_rect = context.enclosing_device_rect(fragment_absolute_rect);
         if (context.should_show_line_box_borders()) {
@@ -677,16 +718,17 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
                 context.rounded_device_point(fragment_absolute_rect.top_left().translated(0, fragment.baseline())).to_type<int>(),
                 context.rounded_device_point(fragment_absolute_rect.top_right().translated(-1, fragment.baseline())).to_type<int>(), Color::Red);
         }
-        if (is<Layout::TextNode>(fragment.layout_node()))
-            paint_text_fragment(context, static_cast<Layout::TextNode const&>(fragment.layout_node()), fragment, phase);
+        if (is<TextPaintable>(fragment.paintable()))
+            paint_text_fragment(context, static_cast<TextPaintable const&>(fragment.paintable()), fragment, phase);
     }
 
     if (should_clip_overflow) {
         context.recording_painter().restore();
         if (corner_clip_id.has_value()) {
-            context.recording_painter().blit_corner_clipping(*corner_clip_id, clip_box.to_type<int>());
+            context.recording_painter().blit_corner_clipping(*corner_clip_id);
             corner_clip_id = {};
         }
+        context.recording_painter().restore();
     }
 }
 
@@ -694,6 +736,11 @@ bool PaintableBox::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigne
 {
     if (!layout_box().is_user_scrollable())
         return false;
+
+    // TODO: Vertical and horizontal scroll overflow should be handled seperately.
+    if (!has_scrollable_overflow())
+        return false;
+
     scroll_by(wheel_delta_x, wheel_delta_y);
     return true;
 }
@@ -708,61 +755,86 @@ Layout::BlockContainer& PaintableWithLines::layout_box()
     return static_cast<Layout::BlockContainer&>(PaintableBox::layout_box());
 }
 
-Optional<HitTestResult> PaintableBox::hit_test(CSSPixelPoint position, HitTestType type) const
+TraversalDecision PaintableBox::hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const
 {
+    if (clip_rect().has_value() && !clip_rect()->contains(position))
+        return TraversalDecision::Continue;
+
+    auto position_adjusted_by_scroll_offset = position;
+    if (enclosing_scroll_frame_offset().has_value())
+        position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset().value());
+
     if (!is_visible())
-        return {};
+        return TraversalDecision::Continue;
 
     if (layout_box().is_viewport()) {
-        const_cast<ViewportPaintable&>(static_cast<ViewportPaintable const&>(*this)).build_stacking_context_tree_if_needed();
-        return stacking_context()->hit_test(position, type);
+        auto& viewport_paintable = const_cast<ViewportPaintable&>(static_cast<ViewportPaintable const&>(*this));
+        viewport_paintable.build_stacking_context_tree_if_needed();
+        viewport_paintable.document().update_paint_and_hit_testing_properties_if_needed();
+        viewport_paintable.refresh_scroll_state();
+        viewport_paintable.refresh_clip_state();
+        return stacking_context()->hit_test(position, type, callback);
     }
 
-    if (!absolute_border_box_rect().contains(position.x(), position.y()))
-        return {};
-
-    for (auto* child = first_child(); child; child = child->next_sibling()) {
-        auto result = child->hit_test(position, type);
-        if (!result.has_value())
+    for (auto const* child = last_child(); child; child = child->previous_sibling()) {
+        auto z_index = child->computed_values().z_index();
+        if (child->layout_node().is_positioned() && z_index.value_or(0) == 0)
             continue;
-        if (!result->paintable->visible_for_hit_testing())
-            continue;
-        return result;
+        if (child->hit_test(position, type, callback) == TraversalDecision::Break)
+            return TraversalDecision::Break;
     }
+
+    if (!absolute_border_box_rect().contains(position_adjusted_by_scroll_offset.x(), position_adjusted_by_scroll_offset.y()))
+        return TraversalDecision::Continue;
 
     if (!visible_for_hit_testing())
-        return {};
+        return TraversalDecision::Continue;
 
-    return HitTestResult { const_cast<PaintableBox&>(*this) };
+    return callback(HitTestResult { const_cast<PaintableBox&>(*this) });
 }
 
-Optional<HitTestResult> PaintableWithLines::hit_test(CSSPixelPoint position, HitTestType type) const
+Optional<HitTestResult> PaintableBox::hit_test(CSSPixelPoint position, HitTestType type) const
 {
-    if (!layout_box().children_are_inline() || m_fragments.is_empty())
-        return PaintableBox::hit_test(position, type);
+    Optional<HitTestResult> result;
+    (void)PaintableBox::hit_test(position, type, [&](HitTestResult candidate) {
+        VERIFY(!result.has_value());
+        if (!candidate.paintable->visible_for_hit_testing())
+            return TraversalDecision::Continue;
+        result = move(candidate);
+        return TraversalDecision::Break;
+    });
+    return result;
+}
 
-    for (auto* child = first_child(); child; child = child->next_sibling()) {
-        auto result = child->hit_test(position, type);
-        if (!result.has_value())
-            continue;
-        if (!result->paintable->visible_for_hit_testing())
-            continue;
-        return result;
+TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestType type, Function<TraversalDecision(HitTestResult)> const& callback) const
+{
+    if (clip_rect().has_value() && !clip_rect()->contains(position))
+        return TraversalDecision::Continue;
+
+    auto position_adjusted_by_scroll_offset = position;
+    if (enclosing_scroll_frame_offset().has_value())
+        position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset().value());
+
+    if (!layout_box().children_are_inline() || m_fragments.is_empty()) {
+        return PaintableBox::hit_test(position, type, callback);
+    }
+
+    for (auto const* child = last_child(); child; child = child->previous_sibling()) {
+        if (child->hit_test(position, type, callback) == TraversalDecision::Break)
+            return TraversalDecision::Break;
     }
 
     Optional<HitTestResult> last_good_candidate;
     for (auto const& fragment : fragments()) {
-        if (is<Layout::Box>(fragment.layout_node()) && static_cast<Layout::Box const&>(fragment.layout_node()).paintable_box()->stacking_context())
+        if (fragment.paintable().stacking_context())
             continue;
-        if (!fragment.layout_node().containing_block()) {
-            dbgln("FIXME: PaintableWithLines::hit_test(): Missing containing block on {}", fragment.layout_node().debug_description());
-            continue;
-        }
         auto fragment_absolute_rect = fragment.absolute_rect();
-        if (fragment_absolute_rect.contains(position)) {
-            if (is<Layout::BlockContainer>(fragment.layout_node()) && fragment.layout_node().paintable())
-                return fragment.layout_node().paintable()->hit_test(position, type);
-            return HitTestResult { const_cast<Paintable&>(const_cast<Paintable&>(*fragment.layout_node().paintable())), fragment.text_index_at(position.x()) };
+        if (fragment_absolute_rect.contains(position_adjusted_by_scroll_offset)) {
+            if (fragment.paintable().hit_test(position, type, callback) == TraversalDecision::Break)
+                return TraversalDecision::Break;
+            HitTestResult hit_test_result { const_cast<Paintable&>(fragment.paintable()), fragment.text_index_at(position_adjusted_by_scroll_offset.x()) };
+            if (callback(hit_test_result) == TraversalDecision::Break)
+                return TraversalDecision::Break;
         }
 
         // If we reached this point, the position is not within the fragment. However, the fragment start or end might be the place to place the cursor.
@@ -770,30 +842,72 @@ Optional<HitTestResult> PaintableWithLines::hit_test(CSSPixelPoint position, Hit
         // The best candidate is either the end of the line above, the beginning of the line below, or the beginning or end of the current line.
         // We arbitrarily choose to consider the end of the line above and ignore the beginning of the line below.
         // If we knew the direction of selection, we could make a better choice.
-        if (fragment_absolute_rect.bottom() - 1 <= position.y()) { // fully below the fragment
-            last_good_candidate = HitTestResult { const_cast<Paintable&>(*fragment.layout_node().paintable()), fragment.start() + fragment.length() };
-        } else if (fragment_absolute_rect.top() <= position.y()) { // vertically within the fragment
-            if (position.x() < fragment_absolute_rect.left()) {    // left of the fragment
-                if (!last_good_candidate.has_value()) {            // first fragment of the line
-                    last_good_candidate = HitTestResult { const_cast<Paintable&>(*fragment.layout_node().paintable()), fragment.start() };
+        if (fragment_absolute_rect.bottom() - 1 <= position_adjusted_by_scroll_offset.y()) { // fully below the fragment
+            last_good_candidate = HitTestResult { const_cast<Paintable&>(fragment.paintable()), fragment.start() + fragment.length() };
+        } else if (fragment_absolute_rect.top() <= position_adjusted_by_scroll_offset.y()) { // vertically within the fragment
+            if (position_adjusted_by_scroll_offset.x() < fragment_absolute_rect.left()) {    // left of the fragment
+                if (!last_good_candidate.has_value()) {                                      // first fragment of the line
+                    last_good_candidate = HitTestResult { const_cast<Paintable&>(fragment.paintable()), fragment.start() };
                 }
             } else { // right of the fragment
-                last_good_candidate = HitTestResult { const_cast<Paintable&>(*fragment.layout_node().paintable()), fragment.start() + fragment.length() };
+                last_good_candidate = HitTestResult { const_cast<Paintable&>(fragment.paintable()), fragment.start() + fragment.length() };
             }
         }
     }
 
-    if (type == HitTestType::TextCursor && last_good_candidate.has_value())
-        return last_good_candidate;
-    if (is_visible() && absolute_border_box_rect().contains(position.x(), position.y()))
-        return HitTestResult { const_cast<PaintableWithLines&>(*this) };
-    return {};
+    if (type == HitTestType::TextCursor && last_good_candidate.has_value()) {
+        if (callback(last_good_candidate.value()) == TraversalDecision::Break)
+            return TraversalDecision::Break;
+    }
+    if (!stacking_context() && is_visible() && absolute_border_box_rect().contains(position_adjusted_by_scroll_offset.x(), position_adjusted_by_scroll_offset.y())) {
+        if (callback(HitTestResult { const_cast<PaintableWithLines&>(*this) }) == TraversalDecision::Break)
+            return TraversalDecision::Break;
+    }
+
+    return TraversalDecision::Continue;
 }
 
 void PaintableBox::set_needs_display() const
 {
     if (auto navigable = this->navigable())
         navigable->set_needs_display(absolute_rect());
+}
+
+Optional<CSSPixelRect> PaintableBox::get_masking_area() const
+{
+    // FIXME: Support clip-paths with transforms.
+    if (!combined_css_transform().is_identity_or_translation())
+        return {};
+    auto clip_path = computed_values().clip_path();
+    // FIXME: Support other clip sources.
+    if (!clip_path.has_value() || !clip_path->is_basic_shape())
+        return {};
+    // FIXME: Support other geometry boxes. See: https://drafts.fxtf.org/css-masking/#typedef-geometry-box
+    return absolute_border_box_rect();
+}
+
+Optional<Gfx::Bitmap::MaskKind> PaintableBox::get_mask_type() const
+{
+    // Always an alpha mask as only basic shapes are supported right now.
+    return Gfx::Bitmap::MaskKind::Alpha;
+}
+
+RefPtr<Gfx::Bitmap> PaintableBox::calculate_mask(PaintContext& context, CSSPixelRect const& masking_area) const
+{
+    VERIFY(computed_values().clip_path()->is_basic_shape());
+    auto const& basic_shape = computed_values().clip_path()->basic_shape();
+    auto path = basic_shape.to_path(masking_area, layout_node());
+    auto device_pixel_scale = context.device_pixels_per_css_pixel();
+    path = path.copy_transformed(Gfx::AffineTransform {}.set_scale(device_pixel_scale, device_pixel_scale));
+    auto mask_rect = context.enclosing_device_rect(masking_area);
+    auto maybe_bitmap = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, mask_rect.size().to_type<int>());
+    if (maybe_bitmap.is_error())
+        return {};
+    auto bitmap = maybe_bitmap.release_value();
+    Gfx::Painter painter(*bitmap);
+    Gfx::AntiAliasingPainter aa_painter(painter);
+    aa_painter.fill_path(path, Color::Black);
+    return bitmap;
 }
 
 }

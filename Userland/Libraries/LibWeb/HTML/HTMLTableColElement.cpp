@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLTableColElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/HTMLTableColElement.h>
 #include <LibWeb/HTML/Numbers.h>
@@ -22,7 +23,7 @@ HTMLTableColElement::~HTMLTableColElement() = default;
 void HTMLTableColElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLTableColElementPrototype>(realm, "HTMLTableColElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLTableColElement);
 }
 
 // https://html.spec.whatwg.org/multipage/tables.html#dom-colgroup-span

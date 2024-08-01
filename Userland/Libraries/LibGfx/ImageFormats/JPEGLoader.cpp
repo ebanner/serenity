@@ -182,6 +182,7 @@ public:
         JPEGStream jpeg_stream { move(stream), move(buffer) };
 
         TRY(jpeg_stream.refill_buffer());
+        jpeg_stream.m_offset_from_start = 0;
         return jpeg_stream;
     }
 
@@ -205,8 +206,10 @@ public:
         auto const discarded_from_buffer = min(m_current_size - m_byte_offset, bytes);
         m_byte_offset += discarded_from_buffer;
 
-        if (discarded_from_buffer < bytes)
+        if (discarded_from_buffer < bytes) {
+            m_offset_from_start += bytes - discarded_from_buffer;
             TRY(m_stream->discard(bytes - discarded_from_buffer));
+        }
 
         return {};
     }
@@ -216,8 +219,10 @@ public:
         auto const copied = m_buffer.span().slice(m_byte_offset).copy_trimmed_to(bytes);
         m_byte_offset += copied;
 
-        if (copied < bytes.size())
+        if (copied < bytes.size()) {
+            m_offset_from_start += bytes.size() - copied;
             TRY(m_stream->read_until_filled(bytes.slice(copied)));
+        }
 
         return {};
     }
@@ -229,7 +234,7 @@ public:
 
     u64 byte_offset() const
     {
-        return m_byte_offset;
+        return m_offset_from_start + m_byte_offset;
     }
 
 private:
@@ -242,6 +247,8 @@ private:
     ErrorOr<void> refill_buffer()
     {
         VERIFY(m_byte_offset == m_current_size);
+
+        m_offset_from_start += m_byte_offset;
 
         m_current_size = TRY(m_stream->read_some(m_buffer.span())).size();
         if (m_current_size == 0)
@@ -259,6 +266,7 @@ private:
     Optional<u16> m_saved_marker {};
 
     Vector<u8> m_buffer {};
+    u64 m_offset_from_start { 0 };
     u64 m_byte_offset { buffer_size };
     u64 m_current_size { buffer_size };
 };
@@ -446,7 +454,8 @@ struct JPEGLoadingContext {
 
     State state { State::NotDecoded };
 
-    Array<Optional<Array<u16, 64>>, 4> quantization_tables {};
+    Array<Array<u16, 64>, 4> quantization_tables {};
+    Array<bool, 4> registered_quantization_tables {};
 
     StartOfFrame frame;
     SamplingFactors sampling_factors {};
@@ -798,12 +807,14 @@ static ErrorOr<void> decode_huffman_stream(JPEGLoadingContext& context, Vector<M
 {
     for (u32 vcursor = 0; vcursor < context.mblock_meta.vcount; vcursor += context.sampling_factors.vertical) {
         for (u32 hcursor = 0; hcursor < context.mblock_meta.hcount; hcursor += context.sampling_factors.horizontal) {
-            u32 i = vcursor * context.mblock_meta.hpadded_count + hcursor;
+            // FIXME: This is likely wrong for non-interleaved scans.
+            VERIFY(context.mblock_meta.hpadded_count % context.sampling_factors.horizontal == 0);
+            u32 number_of_mcus_decoded_so_far = ((vcursor / context.sampling_factors.vertical) * context.mblock_meta.hpadded_count + hcursor) / context.sampling_factors.horizontal;
 
             auto& huffman_stream = context.current_scan->huffman_stream;
 
             if (context.dc_restart_interval > 0) {
-                if (i != 0 && i % (context.dc_restart_interval * context.sampling_factors.vertical * context.sampling_factors.horizontal) == 0) {
+                if (number_of_mcus_decoded_so_far != 0 && number_of_mcus_decoded_so_far % context.dc_restart_interval == 0) {
                     reset_decoder(context);
 
                     // Restart markers are stored in byte boundaries. Advance the huffman stream cursor to
@@ -823,8 +834,8 @@ static ErrorOr<void> decode_huffman_stream(JPEGLoadingContext& context, Vector<M
 
             if (result.is_error()) {
                 if constexpr (JPEG_DEBUG) {
-                    dbgln("Failed to build Macroblock {}: {}", i, result.error());
-                    dbgln("Huffman stream byte offset {}", context.stream.byte_offset());
+                    dbgln("Failed to build Macroblock {}: {}", number_of_mcus_decoded_so_far, result.error());
+                    dbgln("Huffman stream byte offset {:#x}", context.stream.byte_offset());
                 }
                 return result.release_error();
             }
@@ -894,6 +905,7 @@ static inline ErrorOr<Marker> read_marker_at_cursor(JPEGStream& stream)
     if (is_supported_marker(marker))
         return marker;
 
+    dbgln_if(JPEG_DEBUG, "Unsupported marker: {:#04x} around offset {:#x}", marker, stream.byte_offset());
     return Error::from_string_literal("Reached an unsupported marker");
 }
 
@@ -904,6 +916,15 @@ static ErrorOr<u16> read_effective_chunk_size(JPEGStream& stream)
     if (stored_size < 2)
         return Error::from_string_literal("Stored chunk size is too small");
     return stored_size - 2;
+}
+
+static ErrorOr<void> ensure_quantization_tables_are_present(JPEGLoadingContext& context)
+{
+    for (auto const& component : context.current_scan->components) {
+        if (!context.registered_quantization_tables[component.component.quantization_table_id])
+            return Error::from_string_literal("Unknown quantization table id");
+    }
+    return {};
 }
 
 static ErrorOr<void> read_start_of_scan(JPEGStream& stream, JPEGLoadingContext& context)
@@ -972,6 +993,8 @@ static ErrorOr<void> read_start_of_scan(JPEGStream& stream, JPEGLoadingContext& 
     }
 
     context.current_scan = move(current_scan);
+
+    TRY(ensure_quantization_tables_are_present(context));
 
     return {};
 }
@@ -1161,7 +1184,7 @@ static ErrorOr<void> read_colour_encoding(JPEGStream& stream, [[maybe_unused]] J
         context.color_transform = ColorTransform::YCCK;
         break;
     default:
-        dbgln("0x{:x} is not a specified transform flag value, ignoring", color_transform);
+        dbgln("{:#x} is not a specified transform flag value, ignoring", color_transform);
     }
 
     return {};
@@ -1221,14 +1244,14 @@ static ErrorOr<void> read_app_marker(JPEGStream& stream, JPEGLoadingContext& con
     return stream.discard(bytes_to_read);
 }
 
-static inline bool validate_luma_and_modify_context(Component const& luma, JPEGLoadingContext& context)
+static inline bool validate_sampling_factors_and_modify_context(SamplingFactors const& sampling_factors, JPEGLoadingContext& context)
 {
-    if ((luma.sampling_factors.horizontal == 1 || luma.sampling_factors.horizontal == 2) && (luma.sampling_factors.vertical == 1 || luma.sampling_factors.vertical == 2)) {
-        context.mblock_meta.hpadded_count += luma.sampling_factors.horizontal == 1 ? 0 : context.mblock_meta.hcount % 2;
-        context.mblock_meta.vpadded_count += luma.sampling_factors.vertical == 1 ? 0 : context.mblock_meta.vcount % 2;
+    if ((sampling_factors.horizontal == 1 || sampling_factors.horizontal == 2) && (sampling_factors.vertical == 1 || sampling_factors.vertical == 2)) {
+        context.mblock_meta.hpadded_count += sampling_factors.horizontal == 1 ? 0 : context.mblock_meta.hcount % 2;
+        context.mblock_meta.vpadded_count += sampling_factors.vertical == 1 ? 0 : context.mblock_meta.vcount % 2;
         context.mblock_meta.padded_total = context.mblock_meta.hpadded_count * context.mblock_meta.vpadded_count;
         // For easy reference to relevant sample factors.
-        context.sampling_factors = luma.sampling_factors;
+        context.sampling_factors = sampling_factors;
 
         return true;
     }
@@ -1237,8 +1260,8 @@ static inline bool validate_luma_and_modify_context(Component const& luma, JPEGL
 
 static inline void set_macroblock_metadata(JPEGLoadingContext& context)
 {
-    context.mblock_meta.hcount = (context.frame.width + 7) / 8;
-    context.mblock_meta.vcount = (context.frame.height + 7) / 8;
+    context.mblock_meta.hcount = ceil_div<u32>(context.frame.width, 8);
+    context.mblock_meta.vcount = ceil_div<u32>(context.frame.height, 8);
     context.mblock_meta.hpadded_count = context.mblock_meta.hcount;
     context.mblock_meta.vpadded_count = context.mblock_meta.vcount;
     context.mblock_meta.total = context.mblock_meta.hcount * context.mblock_meta.vcount;
@@ -1301,12 +1324,17 @@ static ErrorOr<void> read_start_of_frame(JPEGStream& stream, JPEGLoadingContext&
         component.sampling_factors.horizontal = subsample_factors >> 4;
         component.sampling_factors.vertical = subsample_factors & 0x0F;
 
+        if (component_count == 1) {
+            // 4.8.2 Minimum coded unit: "If the compressed image data is non-interleaved, the MCU is defined to be one data unit."
+            component.sampling_factors = { 1, 1 };
+        }
+
         dbgln_if(JPEG_DEBUG, "Component subsampling: {}, {}", component.sampling_factors.horizontal, component.sampling_factors.vertical);
 
         if (i == 0) {
             // By convention, downsampling is applied only on chroma components. So we should
             //  hope to see the maximum sampling factor in the luma component.
-            if (!validate_luma_and_modify_context(component, context)) {
+            if (!validate_sampling_factors_and_modify_context(component.sampling_factors, context)) {
                 dbgln_if(JPEG_DEBUG, "Unsupported luma subsampling factors: horizontal: {}, vertical: {}",
                     component.sampling_factors.horizontal,
                     component.sampling_factors.vertical);
@@ -1351,12 +1379,9 @@ static ErrorOr<void> read_quantization_table(JPEGStream& stream, JPEGLoadingCont
             return Error::from_string_literal("Unsupported quantization table id");
         }
 
-        auto& maybe_table = context.quantization_tables[table_id];
+        context.registered_quantization_tables[table_id] = true;
 
-        if (!maybe_table.has_value())
-            maybe_table = Array<u16, 64> {};
-
-        auto& table = maybe_table.value();
+        auto& table = context.quantization_tables[table_id];
 
         for (int i = 0; i < 64; i++) {
             if (element_unit_hint == 0)
@@ -1382,19 +1407,14 @@ static ErrorOr<void> skip_segment(JPEGStream& stream)
     return {};
 }
 
-static ErrorOr<void> dequantize(JPEGLoadingContext& context, Vector<Macroblock>& macroblocks)
+static void dequantize(JPEGLoadingContext& context, Vector<Macroblock>& macroblocks)
 {
     for (u32 vcursor = 0; vcursor < context.mblock_meta.vcount; vcursor += context.sampling_factors.vertical) {
         for (u32 hcursor = 0; hcursor < context.mblock_meta.hcount; hcursor += context.sampling_factors.horizontal) {
             for (u32 i = 0; i < context.components.size(); i++) {
                 auto const& component = context.components[i];
 
-                if (!context.quantization_tables[component.quantization_table_id].has_value()) {
-                    dbgln_if(JPEG_DEBUG, "Unknown quantization table id: {}!", component.quantization_table_id);
-                    return Error::from_string_literal("Unknown quantization table id");
-                }
-
-                auto const& table = context.quantization_tables[component.quantization_table_id].value();
+                auto const& table = context.quantization_tables[component.quantization_table_id];
 
                 for (u32 vfactor_i = 0; vfactor_i < component.sampling_factors.vertical; vfactor_i++) {
                     for (u32 hfactor_i = 0; hfactor_i < component.sampling_factors.horizontal; hfactor_i++) {
@@ -1408,19 +1428,19 @@ static ErrorOr<void> dequantize(JPEGLoadingContext& context, Vector<Macroblock>&
             }
         }
     }
-
-    return {};
 }
 
-static void inverse_dct(JPEGLoadingContext const& context, Vector<Macroblock>& macroblocks)
+static void inverse_dct_8x8(i16* block_component)
 {
+    // Does a 2-D IDCT by doing two 1-D IDCTs as described in https://unix4lyfe.org/dct/
+    // The 1-D DCT idea is described at https://unix4lyfe.org/dct-1d/, read aan.cc from bottom to top.
     static float const m0 = 2.0f * AK::cos(1.0f / 16.0f * 2.0f * AK::Pi<float>);
     static float const m1 = 2.0f * AK::cos(2.0f / 16.0f * 2.0f * AK::Pi<float>);
     static float const m3 = 2.0f * AK::cos(2.0f / 16.0f * 2.0f * AK::Pi<float>);
     static float const m5 = 2.0f * AK::cos(3.0f / 16.0f * 2.0f * AK::Pi<float>);
     static float const m2 = m0 - m5;
     static float const m4 = m0 + m5;
-    static float const s0 = AK::cos(0.0f / 16.0f * AK::Pi<float>) * AK::rsqrt(8.0f);
+    static float const s0 = AK::cos(0.0f / 16.0f * AK::Pi<float>) / AK::sqrt(8.0f);
     static float const s1 = AK::cos(1.0f / 16.0f * AK::Pi<float>) / 2.0f;
     static float const s2 = AK::cos(2.0f / 16.0f * AK::Pi<float>) / 2.0f;
     static float const s3 = AK::cos(3.0f / 16.0f * AK::Pi<float>) / 2.0f;
@@ -1429,6 +1449,144 @@ static void inverse_dct(JPEGLoadingContext const& context, Vector<Macroblock>& m
     static float const s6 = AK::cos(6.0f / 16.0f * AK::Pi<float>) / 2.0f;
     static float const s7 = AK::cos(7.0f / 16.0f * AK::Pi<float>) / 2.0f;
 
+    for (u32 k = 0; k < 8; ++k) {
+        float const g0 = block_component[0 * 8 + k] * s0;
+        float const g1 = block_component[4 * 8 + k] * s4;
+        float const g2 = block_component[2 * 8 + k] * s2;
+        float const g3 = block_component[6 * 8 + k] * s6;
+        float const g4 = block_component[5 * 8 + k] * s5;
+        float const g5 = block_component[1 * 8 + k] * s1;
+        float const g6 = block_component[7 * 8 + k] * s7;
+        float const g7 = block_component[3 * 8 + k] * s3;
+
+        float const f0 = g0;
+        float const f1 = g1;
+        float const f2 = g2;
+        float const f3 = g3;
+        float const f4 = g4 - g7;
+        float const f5 = g5 + g6;
+        float const f6 = g5 - g6;
+        float const f7 = g4 + g7;
+
+        float const e0 = f0;
+        float const e1 = f1;
+        float const e2 = f2 - f3;
+        float const e3 = f2 + f3;
+        float const e4 = f4;
+        float const e5 = f5 - f7;
+        float const e6 = f6;
+        float const e7 = f5 + f7;
+        float const e8 = f4 + f6;
+
+        float const d0 = e0;
+        float const d1 = e1;
+        float const d2 = e2 * m1;
+        float const d3 = e3;
+        float const d4 = e4 * m2;
+        float const d5 = e5 * m3;
+        float const d6 = e6 * m4;
+        float const d7 = e7;
+        float const d8 = e8 * m5;
+
+        float const c0 = d0 + d1;
+        float const c1 = d0 - d1;
+        float const c2 = d2 - d3;
+        float const c3 = d3;
+        float const c4 = d4 + d8;
+        float const c5 = d5 + d7;
+        float const c6 = d6 - d8;
+        float const c7 = d7;
+        float const c8 = c5 - c6;
+
+        float const b0 = c0 + c3;
+        float const b1 = c1 + c2;
+        float const b2 = c1 - c2;
+        float const b3 = c0 - c3;
+        float const b4 = c4 - c8;
+        float const b5 = c8;
+        float const b6 = c6 - c7;
+        float const b7 = c7;
+
+        block_component[0 * 8 + k] = b0 + b7;
+        block_component[1 * 8 + k] = b1 + b6;
+        block_component[2 * 8 + k] = b2 + b5;
+        block_component[3 * 8 + k] = b3 + b4;
+        block_component[4 * 8 + k] = b3 - b4;
+        block_component[5 * 8 + k] = b2 - b5;
+        block_component[6 * 8 + k] = b1 - b6;
+        block_component[7 * 8 + k] = b0 - b7;
+    }
+    for (u32 l = 0; l < 8; ++l) {
+        float const g0 = block_component[l * 8 + 0] * s0;
+        float const g1 = block_component[l * 8 + 4] * s4;
+        float const g2 = block_component[l * 8 + 2] * s2;
+        float const g3 = block_component[l * 8 + 6] * s6;
+        float const g4 = block_component[l * 8 + 5] * s5;
+        float const g5 = block_component[l * 8 + 1] * s1;
+        float const g6 = block_component[l * 8 + 7] * s7;
+        float const g7 = block_component[l * 8 + 3] * s3;
+
+        float const f0 = g0;
+        float const f1 = g1;
+        float const f2 = g2;
+        float const f3 = g3;
+        float const f4 = g4 - g7;
+        float const f5 = g5 + g6;
+        float const f6 = g5 - g6;
+        float const f7 = g4 + g7;
+
+        float const e0 = f0;
+        float const e1 = f1;
+        float const e2 = f2 - f3;
+        float const e3 = f2 + f3;
+        float const e4 = f4;
+        float const e5 = f5 - f7;
+        float const e6 = f6;
+        float const e7 = f5 + f7;
+        float const e8 = f4 + f6;
+
+        float const d0 = e0;
+        float const d1 = e1;
+        float const d2 = e2 * m1;
+        float const d3 = e3;
+        float const d4 = e4 * m2;
+        float const d5 = e5 * m3;
+        float const d6 = e6 * m4;
+        float const d7 = e7;
+        float const d8 = e8 * m5;
+
+        float const c0 = d0 + d1;
+        float const c1 = d0 - d1;
+        float const c2 = d2 - d3;
+        float const c3 = d3;
+        float const c4 = d4 + d8;
+        float const c5 = d5 + d7;
+        float const c6 = d6 - d8;
+        float const c7 = d7;
+        float const c8 = c5 - c6;
+
+        float const b0 = c0 + c3;
+        float const b1 = c1 + c2;
+        float const b2 = c1 - c2;
+        float const b3 = c0 - c3;
+        float const b4 = c4 - c8;
+        float const b5 = c8;
+        float const b6 = c6 - c7;
+        float const b7 = c7;
+
+        block_component[l * 8 + 0] = b0 + b7;
+        block_component[l * 8 + 1] = b1 + b6;
+        block_component[l * 8 + 2] = b2 + b5;
+        block_component[l * 8 + 3] = b3 + b4;
+        block_component[l * 8 + 4] = b3 - b4;
+        block_component[l * 8 + 5] = b2 - b5;
+        block_component[l * 8 + 6] = b1 - b6;
+        block_component[l * 8 + 7] = b0 - b7;
+    }
+}
+
+static void inverse_dct(JPEGLoadingContext const& context, Vector<Macroblock>& macroblocks)
+{
     for (u32 vcursor = 0; vcursor < context.mblock_meta.vcount; vcursor += context.sampling_factors.vertical) {
         for (u32 hcursor = 0; hcursor < context.mblock_meta.hcount; hcursor += context.sampling_factors.horizontal) {
             for (u32 component_i = 0; component_i < context.components.size(); component_i++) {
@@ -1438,140 +1596,7 @@ static void inverse_dct(JPEGLoadingContext const& context, Vector<Macroblock>& m
                         u32 macroblock_index = (vcursor + vfactor_i) * context.mblock_meta.hpadded_count + (hfactor_i + hcursor);
                         Macroblock& block = macroblocks[macroblock_index];
                         auto* block_component = get_component(block, component_i);
-                        for (u32 k = 0; k < 8; ++k) {
-                            float const g0 = block_component[0 * 8 + k] * s0;
-                            float const g1 = block_component[4 * 8 + k] * s4;
-                            float const g2 = block_component[2 * 8 + k] * s2;
-                            float const g3 = block_component[6 * 8 + k] * s6;
-                            float const g4 = block_component[5 * 8 + k] * s5;
-                            float const g5 = block_component[1 * 8 + k] * s1;
-                            float const g6 = block_component[7 * 8 + k] * s7;
-                            float const g7 = block_component[3 * 8 + k] * s3;
-
-                            float const f0 = g0;
-                            float const f1 = g1;
-                            float const f2 = g2;
-                            float const f3 = g3;
-                            float const f4 = g4 - g7;
-                            float const f5 = g5 + g6;
-                            float const f6 = g5 - g6;
-                            float const f7 = g4 + g7;
-
-                            float const e0 = f0;
-                            float const e1 = f1;
-                            float const e2 = f2 - f3;
-                            float const e3 = f2 + f3;
-                            float const e4 = f4;
-                            float const e5 = f5 - f7;
-                            float const e6 = f6;
-                            float const e7 = f5 + f7;
-                            float const e8 = f4 + f6;
-
-                            float const d0 = e0;
-                            float const d1 = e1;
-                            float const d2 = e2 * m1;
-                            float const d3 = e3;
-                            float const d4 = e4 * m2;
-                            float const d5 = e5 * m3;
-                            float const d6 = e6 * m4;
-                            float const d7 = e7;
-                            float const d8 = e8 * m5;
-
-                            float const c0 = d0 + d1;
-                            float const c1 = d0 - d1;
-                            float const c2 = d2 - d3;
-                            float const c3 = d3;
-                            float const c4 = d4 + d8;
-                            float const c5 = d5 + d7;
-                            float const c6 = d6 - d8;
-                            float const c7 = d7;
-                            float const c8 = c5 - c6;
-
-                            float const b0 = c0 + c3;
-                            float const b1 = c1 + c2;
-                            float const b2 = c1 - c2;
-                            float const b3 = c0 - c3;
-                            float const b4 = c4 - c8;
-                            float const b5 = c8;
-                            float const b6 = c6 - c7;
-                            float const b7 = c7;
-
-                            block_component[0 * 8 + k] = b0 + b7;
-                            block_component[1 * 8 + k] = b1 + b6;
-                            block_component[2 * 8 + k] = b2 + b5;
-                            block_component[3 * 8 + k] = b3 + b4;
-                            block_component[4 * 8 + k] = b3 - b4;
-                            block_component[5 * 8 + k] = b2 - b5;
-                            block_component[6 * 8 + k] = b1 - b6;
-                            block_component[7 * 8 + k] = b0 - b7;
-                        }
-                        for (u32 l = 0; l < 8; ++l) {
-                            float const g0 = block_component[l * 8 + 0] * s0;
-                            float const g1 = block_component[l * 8 + 4] * s4;
-                            float const g2 = block_component[l * 8 + 2] * s2;
-                            float const g3 = block_component[l * 8 + 6] * s6;
-                            float const g4 = block_component[l * 8 + 5] * s5;
-                            float const g5 = block_component[l * 8 + 1] * s1;
-                            float const g6 = block_component[l * 8 + 7] * s7;
-                            float const g7 = block_component[l * 8 + 3] * s3;
-
-                            float const f0 = g0;
-                            float const f1 = g1;
-                            float const f2 = g2;
-                            float const f3 = g3;
-                            float const f4 = g4 - g7;
-                            float const f5 = g5 + g6;
-                            float const f6 = g5 - g6;
-                            float const f7 = g4 + g7;
-
-                            float const e0 = f0;
-                            float const e1 = f1;
-                            float const e2 = f2 - f3;
-                            float const e3 = f2 + f3;
-                            float const e4 = f4;
-                            float const e5 = f5 - f7;
-                            float const e6 = f6;
-                            float const e7 = f5 + f7;
-                            float const e8 = f4 + f6;
-
-                            float const d0 = e0;
-                            float const d1 = e1;
-                            float const d2 = e2 * m1;
-                            float const d3 = e3;
-                            float const d4 = e4 * m2;
-                            float const d5 = e5 * m3;
-                            float const d6 = e6 * m4;
-                            float const d7 = e7;
-                            float const d8 = e8 * m5;
-
-                            float const c0 = d0 + d1;
-                            float const c1 = d0 - d1;
-                            float const c2 = d2 - d3;
-                            float const c3 = d3;
-                            float const c4 = d4 + d8;
-                            float const c5 = d5 + d7;
-                            float const c6 = d6 - d8;
-                            float const c7 = d7;
-                            float const c8 = c5 - c6;
-
-                            float const b0 = c0 + c3;
-                            float const b1 = c1 + c2;
-                            float const b2 = c1 - c2;
-                            float const b3 = c0 - c3;
-                            float const b4 = c4 - c8;
-                            float const b5 = c8;
-                            float const b6 = c6 - c7;
-                            float const b7 = c7;
-
-                            block_component[l * 8 + 0] = b0 + b7;
-                            block_component[l * 8 + 1] = b1 + b6;
-                            block_component[l * 8 + 2] = b2 + b5;
-                            block_component[l * 8 + 3] = b3 + b4;
-                            block_component[l * 8 + 4] = b3 - b4;
-                            block_component[l * 8 + 5] = b2 - b5;
-                            block_component[l * 8 + 6] = b1 - b6;
-                            block_component[l * 8 + 7] = b0 - b7;
-                        }
+                        inverse_dct_8x8(block_component);
                     }
                 }
             }
@@ -1692,25 +1717,6 @@ static void invert_colors_for_adobe_images(JPEGLoadingContext const& context, Ve
             macroblock.k[i] = 255 - macroblock.k[i];
         }
     }
-}
-
-static ErrorOr<void> cmyk_to_rgb(JPEGLoadingContext& context)
-{
-    VERIFY(context.cmyk_bitmap);
-    VERIFY(!context.bitmap);
-
-    context.bitmap = TRY(Bitmap::create(BitmapFormat::BGRx8888, { context.frame.width, context.frame.height }));
-
-    for (int y = 0; y < context.frame.height; ++y) {
-        for (int x = 0; x < context.frame.width; ++x) {
-            auto const& cmyk = context.cmyk_bitmap->scanline(y)[x];
-            u8 k = 255 - cmyk.k;
-            context.bitmap->scanline(y)[x] = Color((255 - cmyk.c) * k / 255, (255 - cmyk.m) * k / 255, (255 - cmyk.y) * k / 255).value();
-        }
-    }
-
-    context.cmyk_bitmap = nullptr;
-    return {};
 }
 
 static void ycck_to_cmyk(Vector<Macroblock>& macroblocks)
@@ -1965,7 +1971,7 @@ static ErrorOr<Vector<Macroblock>> construct_macroblocks(JPEGLoadingContext& con
 static ErrorOr<void> decode_jpeg(JPEGLoadingContext& context)
 {
     auto macroblocks = TRY(construct_macroblocks(context));
-    TRY(dequantize(context, macroblocks));
+    dequantize(context, macroblocks);
     inverse_dct(context, macroblocks);
     undo_subsampling(context, macroblocks);
     TRY(handle_color_transform(context, macroblocks));
@@ -2026,8 +2032,8 @@ ErrorOr<ImageFrameDescriptor> JPEGImageDecoderPlugin::frame(size_t index, Option
         m_context->state = JPEGLoadingContext::State::BitmapDecoded;
     }
 
-    if (m_context->cmyk_bitmap)
-        TRY(cmyk_to_rgb(*m_context));
+    if (m_context->cmyk_bitmap && !m_context->bitmap)
+        return ImageFrameDescriptor { TRY(m_context->cmyk_bitmap->to_low_quality_rgb()), 0 };
 
     return ImageFrameDescriptor { m_context->bitmap, 0 };
 }

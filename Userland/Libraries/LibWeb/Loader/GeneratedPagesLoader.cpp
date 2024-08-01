@@ -12,7 +12,7 @@
 #include <LibCore/Resource.h>
 #include <LibCore/System.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
-#include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/Loader/UserAgent.h>
 
 namespace Web {
 
@@ -26,7 +26,7 @@ void set_chrome_process_executable_path(StringView executable_path)
     s_chrome_process_executable_path = MUST(String::from_utf8(executable_path));
 }
 
-ErrorOr<String> load_error_page(AK::URL const& url)
+ErrorOr<String> load_error_page(URL::URL const& url)
 {
     // Generate HTML error page from error template file
     // FIXME: Use an actual templating engine (our own one when it's built, preferably with a way to check these usages at compile time)
@@ -38,7 +38,7 @@ ErrorOr<String> load_error_page(AK::URL const& url)
     return TRY(String::from_utf8(generator.as_string_view()));
 }
 
-ErrorOr<String> load_file_directory_page(AK::URL const& url)
+ErrorOr<String> load_file_directory_page(URL::URL const& url)
 {
     // Generate HTML contents entries table
     auto lexical_path = LexicalPath(url.serialize_path());
@@ -60,7 +60,7 @@ ErrorOr<String> load_file_directory_page(AK::URL const& url)
             contents.append("<tr>"sv);
             contents.appendff("<td><span class=\"{}\"></span></td>", is_directory ? "folder" : "file");
             contents.appendff("<td><a href=\"file://{}\">{}</a></td><td>&nbsp;</td>"sv, path, name);
-            contents.appendff("<td>{:10}</td><td>&nbsp;</td>", is_directory ? "-" : human_readable_size(st.st_size));
+            contents.appendff("<td>{:10}</td><td>&nbsp;</td>", is_directory ? "-"_string : human_readable_size(st.st_size));
             contents.appendff("<td>{}</td>"sv, Core::DateTime::from_timestamp(st.st_mtime).to_byte_string());
             contents.append("</tr>\n"sv);
         }

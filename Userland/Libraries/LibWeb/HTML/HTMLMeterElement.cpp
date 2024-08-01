@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLMeterElementPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -26,7 +27,7 @@ HTMLMeterElement::~HTMLMeterElement() = default;
 void HTMLMeterElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLMeterElementPrototype>(realm, "HTMLMeterElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLMeterElement);
 }
 
 void HTMLMeterElement::visit_edges(Cell::Visitor& visitor)
@@ -178,7 +179,7 @@ void HTMLMeterElement::removed_from(DOM::Node*)
 
 void HTMLMeterElement::create_shadow_tree_if_needed()
 {
-    if (shadow_root_internal())
+    if (shadow_root())
         return;
 
     auto shadow_root = heap().allocate<DOM::ShadowRoot>(realm(), document(), *this, Bindings::ShadowRootMode::Closed);

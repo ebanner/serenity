@@ -51,17 +51,21 @@ public:
 
     static JS::NonnullGCPtr<HTMLParser> create_for_scripting(DOM::Document&);
     static JS::NonnullGCPtr<HTMLParser> create_with_uncertain_encoding(DOM::Document&, ByteBuffer const& input);
-    static JS::NonnullGCPtr<HTMLParser> create(DOM::Document&, StringView input, ByteString const& encoding);
+    static JS::NonnullGCPtr<HTMLParser> create(DOM::Document&, StringView input, StringView encoding);
 
-    void run();
-    void run(const AK::URL&);
+    void run(HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
+    void run(const URL::URL&, HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
 
     static void the_end(JS::NonnullGCPtr<DOM::Document>, JS::GCPtr<HTMLParser> = nullptr);
 
     DOM::Document& document();
 
     static Vector<JS::Handle<DOM::Node>> parse_html_fragment(DOM::Element& context_element, StringView);
-    static String serialize_html_fragment(DOM::Node const& node);
+    enum class SerializableShadowRoots {
+        No,
+        Yes,
+    };
+    static String serialize_html_fragment(DOM::Node const&, SerializableShadowRoots, Vector<JS::Handle<DOM::ShadowRoot>> const&, DOM::FragmentSerializationMode = DOM::FragmentSerializationMode::Inner);
 
     enum class InsertionMode {
 #define __ENUMERATE_INSERTION_MODE(mode) mode,
@@ -84,7 +88,7 @@ public:
     size_t script_nesting_level() const { return m_script_nesting_level; }
 
 private:
-    HTMLParser(DOM::Document&, StringView input, ByteString const& encoding);
+    HTMLParser(DOM::Document&, StringView input, StringView encoding);
     HTMLParser(DOM::Document&);
 
     virtual void visit_edges(Cell::Visitor&) override;
@@ -130,9 +134,15 @@ private:
 
     AdjustedInsertionLocation find_appropriate_place_for_inserting_node(JS::GCPtr<DOM::Element> override_target = nullptr);
 
+    void insert_an_element_at_the_adjusted_insertion_location(JS::NonnullGCPtr<DOM::Element>);
+
     DOM::Text* find_character_insertion_node();
     void flush_character_insertions();
-    JS::NonnullGCPtr<DOM::Element> insert_foreign_element(HTMLToken const&, Optional<FlyString> const& namespace_);
+    enum class OnlyAddToElementStack {
+        No,
+        Yes,
+    };
+    JS::NonnullGCPtr<DOM::Element> insert_foreign_element(HTMLToken const&, Optional<FlyString> const& namespace_, OnlyAddToElementStack);
     JS::NonnullGCPtr<DOM::Element> insert_html_element(HTMLToken const&);
     DOM::Element& current_node();
     DOM::Element& adjusted_current_node();

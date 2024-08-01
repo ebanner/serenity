@@ -79,7 +79,7 @@ String ResolvedCSSStyleDeclaration::item(size_t index) const
     if (index > length())
         return {};
     auto property_id = static_cast<PropertyID>(index + to_underlying(first_longhand_property_id));
-    return MUST(String::from_utf8(string_from_property_id(property_id)));
+    return string_from_property_id(property_id).to_string();
 }
 
 static NonnullRefPtr<StyleValue const> style_value_for_background_property(Layout::NodeWithStyle const& layout_node, Function<NonnullRefPtr<StyleValue const>(BackgroundLayerData const&)> callback, Function<NonnullRefPtr<StyleValue const>()> default_value)
@@ -196,6 +196,18 @@ static RefPtr<StyleValue const> style_value_for_shadow(Vector<ShadowData> const&
 
 RefPtr<StyleValue const> ResolvedCSSStyleDeclaration::style_value_for_property(Layout::NodeWithStyle const& layout_node, PropertyID property_id) const
 {
+    auto used_value_for_property = [&layout_node](Function<CSSPixels(Painting::PaintableBox const&)>&& used_value_getter) -> Optional<CSSPixels> {
+        auto const& display = layout_node.computed_values().display();
+        if (!display.is_none() && !display.is_contents() && layout_node.paintable()) {
+            if (layout_node.paintable()->is_paintable_box()) {
+                auto const& paintable_box = static_cast<Painting::PaintableBox const&>(*layout_node.paintable());
+                return used_value_getter(paintable_box);
+            }
+            dbgln("FIXME: Support getting used value for ({})", layout_node.debug_description());
+        }
+        return {};
+    };
+
     // A limited number of properties have special rules for producing their "resolved value".
     // We also have to manually construct shorthands from their longhands here.
     // Everything else uses the computed value.
@@ -269,12 +281,15 @@ RefPtr<StyleValue const> ResolvedCSSStyleDeclaration::style_value_for_property(L
         // -> padding-right
         // -> padding-top
         // -> width
-        // -> A resolved value special case property like height defined in another specification
-        // FIXME: If the property applies to the element or pseudo-element and the resolved value of the
-        //    display property is not none or contents, then the resolved value is the used value.
-        //    Otherwise the resolved value is the computed value.
-    case PropertyID::Height:
+        // If the property applies to the element or pseudo-element and the resolved value of the
+        // display property is not none or contents, then the resolved value is the used value.
+        // Otherwise the resolved value is the computed value.
+    case PropertyID::Height: {
+        auto maybe_used_height = used_value_for_property([](auto const& paintable_box) { return paintable_box.content_height(); });
+        if (maybe_used_height.has_value())
+            return style_value_for_size(Size::make_px(maybe_used_height.release_value()));
         return style_value_for_size(layout_node.computed_values().height());
+    }
     case PropertyID::MarginBlockEnd:
         return style_value_for_length_box_logical_side(layout_node, layout_node.computed_values().margin(), LogicalSide::BlockEnd);
     case PropertyID::MarginBlockStart:
@@ -307,8 +322,12 @@ RefPtr<StyleValue const> ResolvedCSSStyleDeclaration::style_value_for_property(L
         return style_value_for_length_percentage(layout_node.computed_values().padding().right());
     case PropertyID::PaddingTop:
         return style_value_for_length_percentage(layout_node.computed_values().padding().top());
-    case PropertyID::Width:
+    case PropertyID::Width: {
+        auto maybe_used_width = used_value_for_property([](auto const& paintable_box) { return paintable_box.content_width(); });
+        if (maybe_used_width.has_value())
+            return style_value_for_size(Size::make_px(maybe_used_width.release_value()));
         return style_value_for_size(layout_node.computed_values().width());
+    }
 
         // -> bottom
         // -> left
@@ -524,17 +543,12 @@ Optional<StyleProperty> ResolvedCSSStyleDeclaration::property(PropertyID propert
     }
 
     if (!m_element->layout_node()) {
-        auto style_or_error = m_element->document().style_computer().compute_style(const_cast<DOM::Element&>(*m_element));
-        if (style_or_error.is_error()) {
-            dbgln("ResolvedCSSStyleDeclaration::property style computer failed");
-            return {};
-        }
-        auto style = style_or_error.release_value();
+        auto style = m_element->document().style_computer().compute_style(const_cast<DOM::Element&>(*m_element));
 
         // FIXME: This is a stopgap until we implement shorthand -> longhand conversion.
         auto value = style->maybe_null_property(property_id);
         if (!value) {
-            dbgln("FIXME: ResolvedCSSStyleDeclaration::property(property_id=0x{:x}) No value for property ID in newly computed style case.", to_underlying(property_id));
+            dbgln("FIXME: ResolvedCSSStyleDeclaration::property(property_id={:#x}) No value for property ID in newly computed style case.", to_underlying(property_id));
             return {};
         }
         return StyleProperty {

@@ -5,11 +5,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/LexicalPath.h>
 #include <AK/String.h>
 #include <LibCore/System.h>
 #include <LibFileSystem/FileSystem.h>
-#include <LibUnicode/URL.h>
 #include <LibWebView/URL.h>
 
 #if defined(ENABLE_PUBLIC_SUFFIX)
@@ -18,31 +16,15 @@
 
 namespace WebView {
 
-static Optional<URL> create_url_with_url_or_path(String const& url_or_path)
-{
-    auto url = Unicode::create_unicode_url(url_or_path);
-    if (!url.is_error() && url.value().is_valid())
-        return url.release_value();
-
-    auto path = LexicalPath::canonicalized_path(url_or_path.to_byte_string());
-    auto url_from_path = URL::create_with_file_scheme(path);
-    if (url_from_path.is_valid())
-        return url_from_path;
-
-    return {};
-}
-
-static Optional<URL> query_public_suffix_list(StringView url_string)
+static Optional<URL::URL> query_public_suffix_list(StringView url_string)
 {
     auto out = MUST(String::from_utf8(url_string));
     if (!out.starts_with_bytes("about:"sv) && !out.contains("://"sv))
         out = MUST(String::formatted("https://{}"sv, out));
 
-    auto maybe_url = create_url_with_url_or_path(out);
-    if (!maybe_url.has_value())
+    auto url = URL::create_with_url_or_path(out.to_byte_string());
+    if (!url.is_valid())
         return {};
-
-    auto url = maybe_url.release_value();
 
     if (url.host().has<URL::IPv4Address>() || url.host().has<URL::IPv6Address>())
         return url;
@@ -81,7 +63,7 @@ Optional<String> get_public_suffix([[maybe_unused]] StringView host)
 #endif
 }
 
-Optional<URL> sanitize_url(StringView url, Optional<StringView> search_engine, AppendTLD append_tld)
+Optional<URL::URL> sanitize_url(StringView url, Optional<StringView> search_engine, AppendTLD append_tld)
 {
     if (FileSystem::exists(url)) {
         auto path = FileSystem::real_path(url);
@@ -91,7 +73,7 @@ Optional<URL> sanitize_url(StringView url, Optional<StringView> search_engine, A
         return URL::create_with_file_scheme(path.value());
     }
 
-    auto format_search_engine = [&]() -> Optional<URL> {
+    auto format_search_engine = [&]() -> Optional<URL::URL> {
         if (!search_engine.has_value())
             return {};
 
@@ -115,7 +97,7 @@ Optional<URL> sanitize_url(StringView url, Optional<StringView> search_engine, A
     return result.release_value();
 }
 
-static URLParts break_file_url_into_parts(URL const& url, StringView url_string)
+static URLParts break_file_url_into_parts(URL::URL const& url, StringView url_string)
 {
     auto scheme = url_string.substring_view(0, url.scheme().bytes_as_string_view().length() + "://"sv.length());
     auto path = url_string.substring_view(scheme.length());
@@ -123,7 +105,7 @@ static URLParts break_file_url_into_parts(URL const& url, StringView url_string)
     return URLParts { scheme, path, {} };
 }
 
-static URLParts break_web_url_into_parts(URL const& url, StringView url_string)
+static URLParts break_web_url_into_parts(URL::URL const& url, StringView url_string)
 {
     auto scheme = url_string.substring_view(0, url.scheme().bytes_as_string_view().length() + "://"sv.length());
     auto url_without_scheme = url_string.substring_view(scheme.length());
@@ -178,7 +160,7 @@ Optional<URLParts> break_url_into_parts(StringView url_string)
     return {};
 }
 
-URLType url_type(URL const& url)
+URLType url_type(URL::URL const& url)
 {
     if (url.scheme() == "mailto"sv)
         return URLType::Email;
@@ -187,7 +169,7 @@ URLType url_type(URL const& url)
     return URLType::Other;
 }
 
-String url_text_to_copy(URL const& url)
+String url_text_to_copy(URL::URL const& url)
 {
     auto url_text = MUST(url.to_string());
 

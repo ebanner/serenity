@@ -193,7 +193,7 @@ SpreadsheetWidget::SpreadsheetWidget(GUI::Window& parent_window, Vector<NonnullR
         auto& sheet = *worksheet_ptr;
         auto& cells = sheet.selected_cells();
         VERIFY(!cells.is_empty());
-        const auto& data = GUI::Clipboard::the().fetch_data_and_type();
+        auto const& data = GUI::Clipboard::the().fetch_data_and_type();
         if (auto spreadsheet_data = data.metadata.get("text/x-spreadsheet-data"); spreadsheet_data.has_value()) {
             Vector<Spreadsheet::Position> source_positions, target_positions;
             auto lines = spreadsheet_data.value().split_view('\n');
@@ -560,7 +560,7 @@ void SpreadsheetWidget::change_cell_static_color_format(Spreadsheet::FormatType 
         apply_color_to_selected_cells(dialog->color());
 }
 
-void SpreadsheetWidget::save(String const& filename, Core::File& file)
+void SpreadsheetWidget::save(ByteString const& filename, Core::File& file)
 {
     auto result = m_workbook->write_to_file(filename, file);
     if (result.is_error()) {
@@ -569,10 +569,10 @@ void SpreadsheetWidget::save(String const& filename, Core::File& file)
     }
     undo_stack().set_current_unmodified();
     window()->set_modified(false);
-    GUI::Application::the()->set_most_recently_open_file(filename.to_byte_string());
+    GUI::Application::the()->set_most_recently_open_file(filename);
 }
 
-void SpreadsheetWidget::load_file(String const& filename, Core::File& file)
+void SpreadsheetWidget::load_file(ByteString const& filename, Core::File& file)
 {
     auto result = m_workbook->open_file(filename, file);
     if (result.is_error()) {
@@ -592,10 +592,10 @@ void SpreadsheetWidget::load_file(String const& filename, Core::File& file)
 
     setup_tabs(m_workbook->sheets());
     update_window_title();
-    GUI::Application::the()->set_most_recently_open_file(filename.to_byte_string());
+    GUI::Application::the()->set_most_recently_open_file(filename);
 }
 
-void SpreadsheetWidget::import_sheets(String const& filename, Core::File& file)
+void SpreadsheetWidget::import_sheets(ByteString const& filename, Core::File& file)
 {
     auto result = m_workbook->import_file(filename, file);
     if (result.is_error()) {

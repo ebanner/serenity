@@ -33,12 +33,7 @@ void EditEventHandler::handle_delete_character_after(JS::NonnullGCPtr<DOM::Posit
     builder.append(text.bytes_as_string_view().substring_view(*next_grapheme_offset));
     node.set_data(MUST(builder.to_string()));
 
-    // FIXME: When nodes are removed from the DOM, the associated layout nodes become stale and still
-    //        remain in the layout tree. This has to be fixed, this just causes everything to be recomputed
-    //        which really hurts performance.
-    m_browsing_context->active_document()->force_layout();
-
-    m_browsing_context->did_edit({});
+    m_navigable->did_edit({});
 }
 
 // This method is quite convoluted but this is necessary to make editing feel intuitive.
@@ -94,33 +89,43 @@ void EditEventHandler::handle_delete(DOM::Range& range)
         end->remove();
     }
 
-    // FIXME: When nodes are removed from the DOM, the associated layout nodes become stale and still
-    //        remain in the layout tree. This has to be fixed, this just causes everything to be recomputed
-    //        which really hurts performance.
-    m_browsing_context->active_document()->force_layout();
-
-    m_browsing_context->did_edit({});
+    m_navigable->did_edit({});
 }
 
 void EditEventHandler::handle_insert(JS::NonnullGCPtr<DOM::Position> position, u32 code_point)
+{
+    StringBuilder builder;
+    builder.append_code_point(code_point);
+    handle_insert(position, MUST(builder.to_string()));
+}
+
+void EditEventHandler::handle_insert(JS::NonnullGCPtr<DOM::Position> position, String data)
 {
     if (is<DOM::Text>(*position->node())) {
         auto& node = verify_cast<DOM::Text>(*position->node());
 
         StringBuilder builder;
         builder.append(node.data().bytes_as_string_view().substring_view(0, position->offset()));
-        builder.append_code_point(code_point);
+        builder.append(data);
         builder.append(node.data().bytes_as_string_view().substring_view(position->offset()));
-        node.set_data(MUST(builder.to_string()));
 
+        // Cut string by max length
+        // FIXME: Cut by UTF-16 code units instead of raw bytes
+        if (auto max_length = node.max_length(); max_length.has_value() && builder.string_view().length() > *max_length) {
+            node.set_data(MUST(String::from_utf8(builder.string_view().substring_view(0, *max_length))));
+        } else {
+            node.set_data(MUST(builder.to_string()));
+        }
         node.invalidate_style();
+    } else {
+        auto& node = *position->node();
+        auto& realm = node.realm();
+        auto text = realm.heap().allocate<DOM::Text>(realm, node.document(), data);
+        MUST(node.append_child(*text));
+        position->set_node(text);
+        position->set_offset(1);
     }
 
-    // FIXME: When nodes are removed from the DOM, the associated layout nodes become stale and still
-    //        remain in the layout tree. This has to be fixed, this just causes everything to be recomputed
-    //        which really hurts performance.
-    m_browsing_context->active_document()->force_layout();
-
-    m_browsing_context->did_edit({});
+    m_navigable->did_edit({});
 }
 }

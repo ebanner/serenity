@@ -52,7 +52,7 @@ void Inode::sync()
     }
 }
 
-ErrorOr<NonnullRefPtr<Custody>> Inode::resolve_as_link(Credentials const& credentials, Custody& base, RefPtr<Custody>* out_parent, int options, int symlink_recursion_level) const
+ErrorOr<NonnullRefPtr<Custody>> Inode::resolve_as_link(Credentials const& credentials, CustodyBase const& base, RefPtr<Custody>* out_parent, int options, int symlink_recursion_level) const
 {
     // The default implementation simply treats the stored
     // contents as a path and resolves that. That is, it
@@ -88,9 +88,21 @@ void Inode::will_be_destroyed()
         (void)flush_metadata();
 }
 
+ErrorOr<void> Inode::truncate(u64 size)
+{
+    MutexLocker locker(m_inode_lock);
+    return truncate_locked(size);
+}
+
 ErrorOr<size_t> Inode::write_bytes(off_t offset, size_t length, UserOrKernelBuffer const& target_buffer, OpenFileDescription* open_description)
 {
     MutexLocker locker(m_inode_lock);
+    return prepare_and_write_bytes_locked(offset, length, target_buffer, open_description);
+}
+
+ErrorOr<size_t> Inode::prepare_and_write_bytes_locked(off_t offset, size_t length, UserOrKernelBuffer const& target_buffer, OpenFileDescription* open_description)
+{
+    VERIFY(m_inode_lock.is_locked());
     TRY(prepare_to_write_data());
     return write_bytes_locked(offset, length, target_buffer, open_description);
 }

@@ -29,14 +29,7 @@ static int netmask_to_cidr(IPv4Address const& address)
     return 32 - count_trailing_zeroes_safe(address_in_host_representation);
 }
 
-ErrorOr<NonnullRefPtr<NetworkSettingsWidget>> NetworkSettingsWidget::create()
-{
-    auto widget = TRY(try_create());
-    TRY(widget->setup());
-    return widget;
-}
-
-ErrorOr<void> NetworkSettingsWidget::setup()
+ErrorOr<void> NetworkSettingsWidget::initialize()
 {
     m_adapters_combobox = *find_descendant_of_type_named<GUI::ComboBox>("adapters_combobox");
     m_enabled_checkbox = *find_descendant_of_type_named<GUI::CheckBox>("enabled_checkbox");
@@ -172,7 +165,7 @@ ErrorOr<void> NetworkSettingsWidget::apply_settings_impl()
         (void)TRY(Core::System::posix_spawn("/bin/Escalator"sv, &file_actions, nullptr, const_cast<char**>(argv), environ));
 
         auto outfile = TRY(Core::File::adopt_fd(pipefds[1], Core::File::OpenMode::Write, Core::File::ShouldCloseFileDescriptor::No));
-        TRY(outfile->write_until_depleted(json.serialized<StringBuilder>().bytes()));
+        TRY(outfile->write_until_depleted(json.serialized<StringBuilder>()));
     }
 
     return {};
@@ -208,8 +201,7 @@ ErrorOr<Optional<JsonObject>> NetworkSettingsWidget::create_settings_object()
 
 void NetworkSettingsWidget::switch_adapter(ByteString const& adapter)
 {
-    m_adapters_combobox->set_text(adapter, GUI::AllowCallback::No);
-    on_switch_adapter(adapter);
+    m_adapters_combobox->set_text(adapter);
 }
 
 }

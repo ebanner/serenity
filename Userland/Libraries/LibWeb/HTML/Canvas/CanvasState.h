@@ -12,8 +12,8 @@
 #include <LibGfx/AffineTransform.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/PaintStyle.h>
+#include <LibGfx/PathClipper.h>
 #include <LibWeb/Bindings/CanvasRenderingContext2DPrototype.h>
-#include <LibWeb/HTML/Canvas/CanvasPathClipper.h>
 #include <LibWeb/HTML/CanvasGradient.h>
 #include <LibWeb/HTML/CanvasPattern.h>
 
@@ -58,7 +58,7 @@ public:
         {
             return m_fill_or_stroke_style.visit(
                 [&](Gfx::Color color) -> JsFillOrStrokeStyle {
-                    return MUST(String::from_byte_string(color.to_byte_string()));
+                    return color.to_string();
                 },
                 [&](auto handle) -> JsFillOrStrokeStyle {
                     return handle;
@@ -79,7 +79,7 @@ public:
         bool image_smoothing_enabled { true };
         Bindings::ImageSmoothingQuality image_smoothing_quality { Bindings::ImageSmoothingQuality::Low };
         float global_alpha = { 1 };
-        Optional<CanvasClip> clip;
+        Optional<Gfx::ClipPath> clip;
         RefPtr<CSS::StyleValue> font_style_value { nullptr };
         RefPtr<Gfx::Font const> current_font { nullptr };
         Bindings::CanvasTextAlign text_align { Bindings::CanvasTextAlign::Start };

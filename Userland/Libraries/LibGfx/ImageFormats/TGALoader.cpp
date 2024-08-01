@@ -76,9 +76,9 @@ IntSize TGAImageDecoderPlugin::size()
 
 static ErrorOr<void> ensure_header_validity(TGAHeader const& header, size_t whole_image_stream_size)
 {
-    auto bytes_remaining = whole_image_stream_size - sizeof(TGAHeader);
     if ((header.bits_per_pixel % 8) != 0 || header.bits_per_pixel < 8 || header.bits_per_pixel > 32)
         return Error::from_string_literal("Invalid bit depth");
+    auto bytes_remaining = whole_image_stream_size - sizeof(TGAHeader);
     if (header.data_type_code == TGADataType::UncompressedRGB && bytes_remaining < static_cast<u64>(header.width) * header.height * (header.bits_per_pixel / 8))
         return Error::from_string_literal("Not enough data to read an image with the expected size");
     return {};
@@ -91,11 +91,13 @@ ErrorOr<void> TGAImageDecoderPlugin::decode_tga_header()
     return {};
 }
 
-ErrorOr<bool> TGAImageDecoderPlugin::validate_before_create(ReadonlyBytes data)
+bool TGAImageDecoderPlugin::validate_before_create(ReadonlyBytes data)
 {
     FixedMemoryStream stream { data };
-    auto header = TRY(stream.read_value<Gfx::TGAHeader>());
-    return !ensure_header_validity(header, data.size()).is_error();
+    auto header_or_err = stream.read_value<Gfx::TGAHeader>();
+    if (header_or_err.is_error())
+        return false;
+    return !ensure_header_validity(header_or_err.release_value(), data.size()).is_error();
 }
 
 ErrorOr<NonnullOwnPtr<ImageDecoderPlugin>> TGAImageDecoderPlugin::create(ReadonlyBytes data)

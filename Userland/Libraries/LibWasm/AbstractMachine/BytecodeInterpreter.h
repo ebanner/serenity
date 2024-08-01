@@ -62,14 +62,14 @@ protected:
     Optional<VectorType> pop_vector(Configuration&);
     template<typename M, template<typename> typename SetSign, typename VectorType = Native128ByteVectorOf<M, SetSign>>
     Optional<VectorType> peek_vector(Configuration&);
-    void store_to_memory(Configuration&, Instruction const&, ReadonlyBytes data, i32 base);
+    void store_to_memory(Configuration&, Instruction const&, ReadonlyBytes data, u32 base);
     void call_address(Configuration&, FunctionAddress);
 
-    template<typename PopTypeLHS, typename PushType, typename Operator, typename PopTypeRHS = PopTypeLHS>
-    void binary_numeric_operation(Configuration&);
+    template<typename PopTypeLHS, typename PushType, typename Operator, typename PopTypeRHS = PopTypeLHS, typename... Args>
+    void binary_numeric_operation(Configuration&, Args&&...);
 
-    template<typename PopType, typename PushType, typename Operator>
-    void unary_operation(Configuration&);
+    template<typename PopType, typename PushType, typename Operator, typename... Args>
+    void unary_operation(Configuration&, Args&&...);
 
     template<typename V, typename T>
     MakeUnsigned<T> checked_unsigned_truncate(V);

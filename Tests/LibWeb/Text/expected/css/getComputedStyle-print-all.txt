@@ -47,11 +47,15 @@ box-sizing: content-box
 caption-side: top
 clear: none
 clip: auto
+clip-path: none
+clip-rule: nonzero
 color: rgb(0, 0, 0)
 column-count: auto
 column-gap: auto
 content: normal
 cursor: auto
+cx: 0px
+cy: 0px
 direction: ltr
 display: block
 fill: rgb(0, 0, 0)
@@ -81,8 +85,9 @@ grid-row-start: auto
 grid-template-areas: 
 grid-template-columns: 
 grid-template-rows: 
-height: auto
+height: 1479px
 image-rendering: auto
+inline-size: auto
 inset-block-end: auto
 inset-block-start: auto
 inset-inline-end: auto
@@ -136,8 +141,12 @@ padding-top: 0px
 pointer-events: auto
 position: static
 quotes: auto
+r: 0px
 right: auto
 row-gap: auto
+rx: auto
+ry: auto
+scrollbar-width: auto
 stop-color: rgb(0, 0, 0)
 stop-opacity: 1
 stroke: none
@@ -156,13 +165,19 @@ text-shadow: none
 text-transform: none
 top: auto
 transform: none
+transform-box: view-box
 transform-origin: 50% 50%
 transition-delay: 0s
+transition-duration: 0s
+transition-property: all
+transition-timing-function: ease
 user-select: auto
 vertical-align: baseline
 visibility: visible
 white-space: normal
-width: auto
+width: 784px
 word-spacing: normal
 word-wrap: normal
+x: 0px
+y: 0px
 z-index: auto

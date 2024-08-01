@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/AudioContextPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
+#include <LibWeb/HTML/Window.h>
 #include <LibWeb/WebAudio/AudioContext.h>
 #include <LibWeb/WebIDL/Promise.h>
 
@@ -84,16 +86,14 @@ AudioContext::~AudioContext() = default;
 void AudioContext::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::AudioContextPrototype>(realm, "AudioContext"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(AudioContext);
 }
 
 void AudioContext::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    for (auto& promise : m_pending_promises)
-        visitor.visit(promise);
-    for (auto& promise : m_pending_resume_promises)
-        visitor.visit(promise);
+    visitor.visit(m_pending_promises);
+    visitor.visit(m_pending_resume_promises);
 }
 
 // https://www.w3.org/TR/webaudio/#dom-audiocontext-getoutputtimestamp
@@ -109,7 +109,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::resume()
     auto& realm = this->realm();
     auto& vm = realm.vm();
 
-    // FIXME: 1. If this's relevant global object's associated Document is not fully active then return a promise rejected with "InvalidStateError" DOMException.
+    // 1. If this's relevant global object's associated Document is not fully active then return a promise rejected with "InvalidStateError" DOMException.
+    auto const& associated_document = verify_cast<HTML::Window>(HTML::relevant_global_object(*this)).associated_document();
+    if (!associated_document.is_fully_active())
+        return WebIDL::InvalidStateError::create(realm, "Document is not fully active"_fly_string);
 
     // 2. Let promise be a new Promise.
     auto promise = WebIDL::create_promise(realm);
@@ -155,10 +158,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::resume()
     }
 
     // 7.5: queue a media element task to execute the following steps:
-    queue_a_media_element_task([&realm, &promise, this]() {
+    queue_a_media_element_task([&realm, promise, this]() {
         // 7.5.1: Resolve all promises from [[pending resume promises]] in order.
-        for (auto const& promise : m_pending_resume_promises) {
-            *promise->resolve();
+        for (auto const& pending_resume_promise : m_pending_resume_promises) {
+            *pending_resume_promise->resolve();
         }
 
         // 7.5.2: Clear [[pending resume promises]].
@@ -191,7 +194,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::suspend()
     auto& realm = this->realm();
     auto& vm = realm.vm();
 
-    // FIXME: 1. If this's relevant global object's associated Document is not fully active then return a promise rejected with "InvalidStateError" DOMException.
+    // 1. If this's relevant global object's associated Document is not fully active then return a promise rejected with "InvalidStateError" DOMException.
+    auto const& associated_document = verify_cast<HTML::Window>(HTML::relevant_global_object(*this)).associated_document();
+    if (!associated_document.is_fully_active())
+        return WebIDL::InvalidStateError::create(realm, "Document is not fully active"_fly_string);
 
     // 2. Let promise be a new Promise.
     auto promise = WebIDL::create_promise(realm);
@@ -220,7 +226,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::suspend()
     set_rendering_state(Bindings::AudioContextState::Suspended);
 
     // 7.3: queue a media element task to execute the following steps:
-    queue_a_media_element_task([&realm, &promise, this]() {
+    queue_a_media_element_task([&realm, promise, this]() {
         // 7.3.1: Resolve promise.
         *promise->resolve();
 
@@ -245,7 +251,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::close()
 {
     auto& realm = this->realm();
 
-    // FIXME: 1. If this's relevant global object's associated Document is not fully active then return a promise rejected with "InvalidStateError" DOMException.
+    // 1. If this's relevant global object's associated Document is not fully active then return a promise rejected with "InvalidStateError" DOMException.
+    auto const& associated_document = verify_cast<HTML::Window>(HTML::relevant_global_object(*this)).associated_document();
+    if (!associated_document.is_fully_active())
+        return WebIDL::InvalidStateError::create(realm, "Document is not fully active"_fly_string);
 
     // 2. Let promise be a new Promise.
     auto promise = WebIDL::create_promise(realm);
@@ -270,7 +279,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::close()
     // FIXME: 5.3: If this control message is being run in a reaction to the document being unloaded, abort this algorithm.
 
     // 5.4: queue a media element task to execute the following steps:
-    queue_a_media_element_task([&realm, &promise, this]() {
+    queue_a_media_element_task([&realm, promise, this]() {
         // 5.4.1: Resolve promise.
         *promise->resolve();
 
@@ -289,9 +298,9 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Promise>> AudioContext::close()
     return JS::NonnullGCPtr { verify_cast<JS::Promise>(*promise->promise()) };
 }
 
-void AudioContext::queue_a_media_element_task(JS::SafeFunction<void()> steps)
+void AudioContext::queue_a_media_element_task(Function<void()> steps)
 {
-    auto task = HTML::Task::create(m_media_element_event_task_source.source, HTML::current_settings_object().responsible_document(), move(steps));
+    auto task = HTML::Task::create(vm(), m_media_element_event_task_source.source, HTML::current_settings_object().responsible_document(), JS::create_heap_function(heap(), move(steps)));
     HTML::main_thread_event_loop().task_queue().add(move(task));
 }
 

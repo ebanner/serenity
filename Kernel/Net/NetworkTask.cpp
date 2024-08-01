@@ -340,9 +340,9 @@ void send_tcp_rst(IPv4Packet const& ipv4_packet, TCPPacket const& tcp_packet, Re
 
     auto ipv4_payload_offset = routing_decision.adapter->ipv4_payload_offset();
 
-    const size_t options_size = 0;
-    const size_t tcp_header_size = sizeof(TCPPacket) + options_size;
-    const size_t buffer_size = ipv4_payload_offset + tcp_header_size;
+    size_t const options_size = 0;
+    size_t const tcp_header_size = sizeof(TCPPacket) + options_size;
+    size_t const buffer_size = ipv4_payload_offset + tcp_header_size;
 
     auto packet = routing_decision.adapter->acquire_packet_buffer(buffer_size);
     if (!packet)
@@ -447,7 +447,12 @@ void handle_tcp(IPv4Packet const& ipv4_packet, UnixDateTime const& packet_timest
     switch (socket->state()) {
     case TCPSocket::State::Closed:
         dbgln("handle_tcp: unexpected flags in Closed state ({:x}) for socket with tuple {}", tcp_packet.flags(), tuple.to_string());
-        // TODO: we may want to send an RST here, maybe as a configurable option
+        if (tcp_packet.has_rst()) {
+            return;
+        }
+        socket->set_sequence_number(tcp_packet.has_ack() ? tcp_packet.ack_number() : 0);
+        socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
+        (void)socket->send_tcp_packet(TCPFlags::RST | TCPFlags::ACK);
         return;
     case TCPSocket::State::TimeWait:
         dbgln("handle_tcp: unexpected flags in TimeWait state ({:x}) for socket with tuple {}", tcp_packet.flags(), tuple.to_string());

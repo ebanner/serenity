@@ -195,8 +195,63 @@ ThrowCompletionOr<GCPtr<Object>> iterator_step(VM& vm, IteratorRecord const& ite
     return result;
 }
 
-// 7.4.8 IteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-iteratorclose
-// 7.4.10 AsyncIteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-asynciteratorclose
+// 7.4.8 IteratorStepValue ( iteratorRecord ), https://tc39.es/ecma262/#sec-iteratorstepvalue
+ThrowCompletionOr<Optional<Value>> iterator_step_value(VM& vm, IteratorRecord& iterator_record)
+{
+    // 1. Let result be Completion(IteratorNext(iteratorRecord)).
+    auto result = iterator_next(vm, iterator_record);
+
+    // 2. If result is a throw completion, then
+    if (result.is_throw_completion()) {
+        // a. Set iteratorRecord.[[Done]] to true.
+        iterator_record.done = true;
+
+        // b. Return ? result.
+        return result.release_error();
+    }
+
+    // 3. Set result to ! result.
+    auto result_value = result.release_value();
+
+    // 4. Let done be Completion(IteratorComplete(result)).
+    auto done = iterator_complete(vm, result_value);
+
+    // 5. If done is a throw completion, then
+    if (done.is_throw_completion()) {
+        // a. Set iteratorRecord.[[Done]] to true.
+        iterator_record.done = true;
+
+        // b. Return ? done.
+        return done.release_error();
+    }
+
+    // 6. Set done to ! done.
+    auto done_value = done.release_value();
+
+    // 7. If done is true, then
+    if (done_value) {
+        // a. Set iteratorRecord.[[Done]] to true.
+        iterator_record.done = true;
+
+        // b. Return DONE.
+        return OptionalNone {};
+    }
+
+    // 8. Let value be Completion(Get(result, "value")).
+    auto value = result_value->get(vm.names.value);
+
+    // 9. If value is a throw completion, then
+    if (value.is_throw_completion()) {
+        // a. Set iteratorRecord.[[Done]] to true.
+        iterator_record.done = true;
+    }
+
+    // 10. Return ? value.
+    return TRY(value);
+}
+
+// 7.4.9 IteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-iteratorclose
+// 7.4.11 AsyncIteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-asynciteratorclose
 // NOTE: These only differ in that async awaits the inner value after the call.
 static Completion iterator_close_impl(VM& vm, IteratorRecord const& iterator_record, Completion completion, IteratorHint iterator_hint)
 {
@@ -246,19 +301,19 @@ static Completion iterator_close_impl(VM& vm, IteratorRecord const& iterator_rec
     return completion;
 }
 
-// 7.4.8 IteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-iteratorclose
+// 7.4.9 IteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-iteratorclose
 Completion iterator_close(VM& vm, IteratorRecord const& iterator_record, Completion completion)
 {
     return iterator_close_impl(vm, iterator_record, move(completion), IteratorHint::Sync);
 }
 
-// 7.4.10 AsyncIteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-asynciteratorclose
+// 7.4.11 AsyncIteratorClose ( iteratorRecord, completion ), https://tc39.es/ecma262/#sec-asynciteratorclose
 Completion async_iterator_close(VM& vm, IteratorRecord const& iterator_record, Completion completion)
 {
     return iterator_close_impl(vm, iterator_record, move(completion), IteratorHint::Async);
 }
 
-// 7.4.11 CreateIterResultObject ( value, done ), https://tc39.es/ecma262/#sec-createiterresultobject
+// 7.4.12 CreateIterResultObject ( value, done ), https://tc39.es/ecma262/#sec-createiterresultobject
 NonnullGCPtr<Object> create_iterator_result_object(VM& vm, Value value, bool done)
 {
     auto& realm = *vm.current_realm();
@@ -276,32 +331,26 @@ NonnullGCPtr<Object> create_iterator_result_object(VM& vm, Value value, bool don
     return object;
 }
 
-// 7.4.13 IteratorToList ( iteratorRecord ), https://tc39.es/ecma262/#sec-iteratortolist
-ThrowCompletionOr<MarkedVector<Value>> iterator_to_list(VM& vm, IteratorRecord const& iterator_record)
+// 7.4.14 IteratorToList ( iteratorRecord ), https://tc39.es/ecma262/#sec-iteratortolist
+ThrowCompletionOr<MarkedVector<Value>> iterator_to_list(VM& vm, IteratorRecord& iterator_record)
 {
     // 1. Let values be a new empty List.
     MarkedVector<Value> values(vm.heap());
 
-    // 2. Let next be true.
-    GCPtr<Object> next;
+    // 2. Repeat,
+    while (true) {
+        // a. Let next be ? IteratorStepValue(iteratorRecord).
+        auto next = TRY(iterator_step_value(vm, iterator_record));
 
-    // 3. Repeat, while next is not false,
-    do {
-        // a. Set next to ? IteratorStep(iteratorRecord).
-        next = TRY(iterator_step(vm, iterator_record));
-
-        // b. If next is not false, then
-        if (next) {
-            // i. Let nextValue be ? IteratorValue(next).
-            auto next_value = TRY(iterator_value(vm, *next));
-
-            // ii. Append nextValue to values.
-            TRY_OR_THROW_OOM(vm, values.try_append(next_value));
+        // b. If next is DONE, then
+        if (!next.has_value()) {
+            // i. Return values.
+            return values;
         }
-    } while (next);
 
-    // 4. Return values.
-    return values;
+        // c. Append next to values.
+        values.append(next.release_value());
+    }
 }
 
 // Non-standard
@@ -310,13 +359,11 @@ Completion get_iterator_values(VM& vm, Value iterable, IteratorValueCallback cal
     auto iterator_record = TRY(get_iterator(vm, iterable, IteratorHint::Sync));
 
     while (true) {
-        auto next_object = TRY(iterator_step(vm, iterator_record));
-        if (!next_object)
+        auto next = TRY(iterator_step_value(vm, iterator_record));
+        if (!next.has_value())
             return {};
 
-        auto next_value = TRY(iterator_value(vm, *next_object));
-
-        if (auto completion = callback(next_value); completion.has_value())
+        if (auto completion = callback(next.release_value()); completion.has_value())
             return iterator_close(vm, iterator_record, completion.release_value());
     }
 }

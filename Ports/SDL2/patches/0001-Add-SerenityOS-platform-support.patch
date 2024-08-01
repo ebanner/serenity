@@ -21,6 +21,7 @@ Co-Authored-By: circl <circl.lastname@gmail.com>
 Co-Authored-By: kleines Filmröllchen <filmroellchen@serenityos.org>
 Co-Authored-By: Linus Groh <mail@linusgroh.de>
 Co-Authored-By: Tim Ledbetter <timledbetter@gmail.com>
+Co-Authored-By: Refrag <R3FR4GYT@gmail.com>
 ---
  CMakeLists.txt                                |  25 +-
  build-scripts/config.sub                      |   3 +
@@ -37,13 +38,13 @@ Co-Authored-By: Tim Ledbetter <timledbetter@gmail.com>
  src/video/SDL_video.c                         |  13 +
  src/video/serenity/SDL_serenityevents.cpp     |  52 ++
  src/video/serenity/SDL_serenityevents_c.h     |  33 +
- src/video/serenity/SDL_serenitymessagebox.cpp |  40 ++
+ src/video/serenity/SDL_serenitymessagebox.cpp |  47 ++
  src/video/serenity/SDL_serenitymessagebox.h   |  38 +
- src/video/serenity/SDL_serenitymouse.cpp      | 142 ++++
+ src/video/serenity/SDL_serenitymouse.cpp      | 169 +++++
  src/video/serenity/SDL_serenitymouse.h        |  39 ++
  src/video/serenity/SDL_serenityvideo.cpp      | 655 ++++++++++++++++++
  src/video/serenity/SDL_serenityvideo.h        | 101 +++
- 21 files changed, 1358 insertions(+), 26 deletions(-)
+ 21 files changed, 1392 insertions(+), 26 deletions(-)
  create mode 100644 src/audio/serenity/SDL_serenityaudio.cpp
  create mode 100644 src/audio/serenity/SDL_serenityaudio.h
  create mode 100644 src/video/serenity/SDL_serenityevents.cpp
@@ -136,7 +137,7 @@ index c4aec174e35ee653c4c4e0449939054e0f68ad9d..2f88b7f8790df95838e7de7a45789804
 +    set(HAVE_SDL_VIDEO TRUE)
 +    set(HAVE_SDL_AUDIO TRUE)
 +
-+    set(CMAKE_CXX_FLAGS "-std=c++2a ${CMAKE_CXX_FLAGS}")
++    set(CMAKE_CXX_FLAGS "-std=c++23 ${CMAKE_CXX_FLAGS}")
 +    file(GLOB SERENITY_SOURCES ${SDL2_SOURCE_DIR}/src/video/serenity/*.cpp ${SDL2_SOURCE_DIR}/src/audio/serenity/*.cpp)
 +    set(SOURCE_FILES ${SOURCE_FILES} ${SERENITY_SOURCES})
 +    set(SDL_VIDEO_DRIVER_SERENITY 1)
@@ -144,7 +145,7 @@ index c4aec174e35ee653c4c4e0449939054e0f68ad9d..2f88b7f8790df95838e7de7a45789804
 +    set(SDL_THREAD_PTHREAD_RECURSIVE_MUTEX 1)
 +    set(HAVE_VIDEO_OPENGL TRUE)
 +    set(SDL_VIDEO_OPENGL 1)
-+    list(APPEND EXTRA_LIBS ipc gui gfx gl core)
++    list(APPEND EXTRA_LIBS ipc gui gfx gl core coreminimal)
 +endmacro(CheckSerenity)
 +
  # Requires:
@@ -606,10 +607,10 @@ index 0000000000000000000000000000000000000000..89e9e919e319c701144da8f6d73bbb2e
 +/* vi: set ts=4 sw=4 expandtab: */
 diff --git a/src/video/serenity/SDL_serenitymessagebox.cpp b/src/video/serenity/SDL_serenitymessagebox.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe41a8beecc4f1e6b9cc17831d53b43c05f167f1
+index 0000000000000000000000000000000000000000..a0c7d0772be7198a521708abb9d69ef9cc413597
 --- /dev/null
 +++ b/src/video/serenity/SDL_serenitymessagebox.cpp
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,47 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2019 Sam Lantinga <slouken@libsdl.org>
@@ -639,10 +640,17 @@ index 0000000000000000000000000000000000000000..fe41a8beecc4f1e6b9cc17831d53b43c
 +#    include "SDL_messagebox.h"
 +#    include "SDL_serenitymessagebox.h"
 +
++#    include <LibGUI/Application.h>
 +#    include <LibGUI/MessageBox.h>
++#    include <LibMain/Main.h>
 +
 +extern "C" int SERENITY_ShowMessageBox(const SDL_MessageBoxData *messageboxdata, int *buttonid)
 +{
++    // From the docs: "[SDL_ShowMessageBox] may be called at any time, even before SDL_Init()."
++    AK::RefPtr<GUI::Application> app = GUI::Application::the();
++    if (app == nullptr)
++        app = MUST(GUI::Application::create(Main::Arguments {}));
++
 +    GUI::MessageBox::show(nullptr, { messageboxdata->message, strlen(messageboxdata->message) }, { messageboxdata->title, strlen(messageboxdata->title) });
 +    return 0;
 +}
@@ -696,10 +704,10 @@ index 0000000000000000000000000000000000000000..34e607783310310ac8956bccf584b5ab
 +/* vi: set ts=4 sw=4 expandtab: */
 diff --git a/src/video/serenity/SDL_serenitymouse.cpp b/src/video/serenity/SDL_serenitymouse.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d0cb527a03dc0ac775ed68d66451495bf993ec6
+index 0000000000000000000000000000000000000000..c603fe8cedaae61ab8ae84407734d1c89f99ff06
 --- /dev/null
 +++ b/src/video/serenity/SDL_serenitymouse.cpp
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,157 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2021 Sam Lantinga <slouken@libsdl.org>
@@ -739,6 +747,7 @@ index 0000000000000000000000000000000000000000..5d0cb527a03dc0ac775ed68d66451495
 +#include "SDL_serenityvideo.h"
 +
 +#include <LibGfx/StandardCursor.h>
++#include <LibGUI/ConnectionToWindowServer.h>
 +
 +struct SerenityCursorData final {
 +    Gfx::StandardCursor cursor_type;
@@ -814,6 +823,20 @@ index 0000000000000000000000000000000000000000..5d0cb527a03dc0ac775ed68d66451495
 +    return 0;
 +}
 +
++static void
++SERENITY_WarpMouse(SDL_Window *window, int x, int y)
++{
++    auto platform_window = SerenityPlatformWindow::from_sdl_window(window);
++
++    auto window_position = platform_window->window()->position();
++    auto warp_position = Gfx::Point(x, y);
++
++    auto absolute_warp_position = window_position + warp_position;
++
++    GUI::ConnectionToWindowServer::the().async_set_global_cursor_position(absolute_warp_position);
++    SDL_SendMouseMotion(window, 0, 0, warp_position.x(), warp_position.y());
++}
++
 +void
 +SERENITY_InitMouse(_THIS)
 +{
@@ -824,10 +847,10 @@ index 0000000000000000000000000000000000000000..5d0cb527a03dc0ac775ed68d66451495
 +    mouse->CreateSystemCursor = SERENITY_CreateSystemCursor;
 +    mouse->ShowCursor = SERENITY_ShowCursor;
 +    mouse->FreeCursor = SERENITY_FreeCursor;
++    mouse->WarpMouse = SERENITY_WarpMouse;
 +
 +    // FIXME: implement below methods
 +    //mouse->CreateCursor = ...;
-+    //mouse->WarpMouse = ...;
 +    //mouse->SetRelativeMouseMode = ...;
 +
 +    SDL_SetDefaultCursor(SERENITY_CreateDefaultCursor());

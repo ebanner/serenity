@@ -241,17 +241,17 @@ ThrowCompletionOr<GroupsType> group_by(VM& vm, Value items, Value callback_funct
             return iterator_close(vm, iterator_record, move(error));
         }
 
-        // b. Let next be ? IteratorStep(iteratorRecord).
-        auto next = TRY(iterator_step(vm, iterator_record));
+        // b. Let next be ? IteratorStepValue(iteratorRecord).
+        auto next = TRY(iterator_step_value(vm, iterator_record));
 
-        // c. If next is false, then
-        if (!next) {
+        // c. If next is DONE, then
+        if (!next.has_value()) {
             // i. Return groups.
             return ThrowCompletionOr<GroupsType> { move(groups) };
         }
 
-        // d. Let value be ? IteratorValue(next).
-        auto value = TRY(iterator_value(vm, *next));
+        // d. Let value be next.
+        auto value = next.release_value();
 
         // e. Let key be Completion(Call(callbackfn, undefined, « value, 𝔽(k) »)).
         auto key = call(vm, callback_function, js_undefined(), value, Value(k));
@@ -314,6 +314,27 @@ auto modulo(Crypto::BigInteger auto const& x, Crypto::BigInteger auto const& y)
     if (result.is_negative())
         result = result.plus(y);
     return result;
+}
+
+// remainder(x, y), https://tc39.es/proposal-temporal/#eqn-remainder
+template<Arithmetic T, Arithmetic U>
+auto remainder(T x, U y)
+{
+    // The mathematical function remainder(x, y) produces the mathematical value whose sign is the sign of x and whose magnitude is abs(x) modulo y.
+    VERIFY(y != 0);
+    if constexpr (IsFloatingPoint<T> || IsFloatingPoint<U>) {
+        if constexpr (IsFloatingPoint<U>)
+            VERIFY(isfinite(y));
+        return fmod(x, y);
+    } else {
+        return x % y;
+    }
+}
+
+auto remainder(Crypto::BigInteger auto const& x, Crypto::BigInteger auto const& y)
+{
+    VERIFY(!y.is_zero());
+    return x.divided_by(y).remainder;
 }
 
 }

@@ -42,14 +42,13 @@ JS::NonnullGCPtr<CSSRuleList> CSSRuleList::create_empty(JS::Realm& realm)
 void CSSRuleList::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::CSSRuleListPrototype>(realm, "CSSRuleList"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(CSSRuleList);
 }
 
 void CSSRuleList::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    for (auto& rule : m_rules)
-        visitor.visit(rule);
+    visitor.visit(m_rules);
 }
 
 bool CSSRuleList::is_supported_property_index(u32 index) const

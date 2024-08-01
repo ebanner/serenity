@@ -12,6 +12,7 @@
 #include "Browser.h"
 #include "InspectorWidget.h"
 #include "Tab.h"
+#include "TaskManagerWidget.h"
 #include <Applications/Browser/BrowserWindowGML.h>
 #include <Applications/BrowserSettings/Defaults.h>
 #include <LibConfig/Client.h>
@@ -32,8 +33,9 @@
 #include <LibGUI/Widget.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
 #include <LibWeb/Dump.h>
+#include <LibWeb/HTML/AudioPlayState.h>
 #include <LibWeb/Layout/Viewport.h>
-#include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/Loader/UserAgent.h>
 #include <LibWebView/CookieJar.h>
 #include <LibWebView/OutOfProcessWebView.h>
 #include <LibWebView/SearchEngine.h>
@@ -50,7 +52,7 @@ static ByteString bookmarks_file_path()
     return builder.to_byte_string();
 }
 
-BrowserWindow::BrowserWindow(WebView::CookieJar& cookie_jar, Vector<URL> const& initial_urls, StringView const man_file)
+BrowserWindow::BrowserWindow(WebView::CookieJar& cookie_jar, Vector<URL::URL> const& initial_urls, StringView const man_file)
     : m_cookie_jar(cookie_jar)
     , m_window_actions(*this)
 {
@@ -60,7 +62,7 @@ BrowserWindow::BrowserWindow(WebView::CookieJar& cookie_jar, Vector<URL> const& 
     restore_size_and_position("Browser"sv, "Window"sv, { { 730, 560 } });
     save_size_and_position_on_close("Browser"sv, "Window"sv);
     set_icon(app_icon.bitmap_for_size(16));
-    set_title("Ladybird");
+    set_title("Browser");
 
     auto widget = set_main_widget<GUI::Widget>();
     widget->load_from_gml(browser_window_gml).release_value_but_fixme_should_propagate_errors();
@@ -227,6 +229,16 @@ void BrowserWindow::build_menus(StringView const man_file)
             GUI::Clipboard::the().set_plain_text(selected_text);
     });
 
+    m_paste_action = GUI::CommonActions::make_paste_action([this](auto&) {
+        auto& tab = active_tab();
+
+        auto [data, mime_type, metadata] = GUI::Clipboard::the().fetch_data_and_type();
+        if (data.is_empty() || !mime_type.starts_with("text/"sv))
+            return;
+
+        tab.view().paste(MUST(String::from_utf8(StringView { data })));
+    });
+
     m_select_all_action = GUI::CommonActions::make_select_all_action([this](auto&) {
         active_tab().view().select_all();
     });
@@ -252,9 +264,16 @@ void BrowserWindow::build_menus(StringView const man_file)
         this);
     m_inspect_dom_node_action->set_status_tip("Open inspector for this element"_string);
 
+    m_task_manager_action = GUI::Action::create(
+        "Task &Manager", g_icon_bag.task_manager, [this](auto&) {
+            show_task_manager_window();
+        },
+        this);
+
     auto inspect_menu = add_menu("&Inspect"_string);
     inspect_menu->add_action(*m_view_source_action);
     inspect_menu->add_action(*m_inspect_dom_tree_action);
+    inspect_menu->add_action(*m_task_manager_action);
 
     auto storage_window_action = GUI::Action::create(
         "Open S&torage Inspector", g_icon_bag.cookie, [this](auto&) {
@@ -278,7 +297,7 @@ void BrowserWindow::build_menus(StringView const man_file)
         "Set Homepage URL...", g_icon_bag.go_home, [this](auto&) {
             String homepage_url = String::from_byte_string(Config::read_string("Browser"sv, "Preferences"sv, "Home"sv, Browser::default_homepage_url)).release_value_but_fixme_should_propagate_errors();
             if (GUI::InputBox::show(this, homepage_url, "Enter a URL:"sv, "Change Homepage"sv) == GUI::InputBox::ExecResult::OK) {
-                if (URL(homepage_url).is_valid()) {
+                if (URL::URL(homepage_url).is_valid()) {
                     Config::write_string("Browser"sv, "Preferences"sv, "Home"sv, homepage_url);
                     Browser::g_home_url = homepage_url.to_byte_string();
                 } else {
@@ -358,12 +377,10 @@ void BrowserWindow::build_menus(StringView const man_file)
         },
         this));
     debug_menu->add_action(GUI::Action::create("Dump &History", { Mod_Ctrl, Key_H }, g_icon_bag.history, [this](auto&) {
-        active_tab().m_history.dump();
+        active_tab().view().debug_request("dump-session-history");
     }));
     debug_menu->add_action(GUI::Action::create("Dump C&ookies", g_icon_bag.cookie, [this](auto&) {
-        auto& tab = active_tab();
-        if (tab.on_dump_cookies)
-            tab.on_dump_cookies();
+        m_cookie_jar.dump_cookies();
     }));
     debug_menu->add_action(GUI::Action::create("Dump Loc&al Storage", g_icon_bag.local_storage, [this](auto&) {
         active_tab().view().debug_request("dump-local-storage");
@@ -530,14 +547,15 @@ void BrowserWindow::set_window_title_for_tab(Tab const& tab)
 {
     auto& title = tab.title();
     auto url = tab.url();
-    set_title(ByteString::formatted("{} - Ladybird", title.is_empty() ? url.to_byte_string() : title));
+    set_title(ByteString::formatted("{} - Browser", title.is_empty() ? url.to_byte_string() : title));
 }
 
-Tab& BrowserWindow::create_new_tab(URL const& url, Web::HTML::ActivateTab activate)
+Tab& BrowserWindow::create_new_tab(URL::URL const& url, Web::HTML::ActivateTab activate)
 {
     auto& new_tab = m_tab_widget->add_tab<Browser::Tab>("New tab"_string, *this);
 
     m_tab_widget->set_bar_visible(!is_fullscreen() && m_tab_widget->children().size() > 1);
+    m_tab_widget->set_tab_icon(new_tab, new_tab.icon());
 
     new_tab.on_title_change = [this, &new_tab](auto& title) {
         m_tab_widget->set_tab_title(new_tab, String::from_byte_string(title).release_value_but_fixme_should_propagate_errors());
@@ -547,6 +565,18 @@ Tab& BrowserWindow::create_new_tab(URL const& url, Web::HTML::ActivateTab activa
 
     new_tab.on_favicon_change = [this, &new_tab](auto& bitmap) {
         m_tab_widget->set_tab_icon(new_tab, &bitmap);
+    };
+
+    new_tab.view().on_audio_play_state_changed = [this, &new_tab](auto play_state) {
+        switch (play_state) {
+        case Web::HTML::AudioPlayState::Paused:
+            m_tab_widget->set_tab_action_icon(new_tab, nullptr);
+            break;
+
+        case Web::HTML::AudioPlayState::Playing:
+            m_tab_widget->set_tab_action_icon(new_tab, g_icon_bag.unmute);
+            break;
+        }
     };
 
     new_tab.on_tab_open_request = [this](auto& url) {
@@ -578,28 +608,24 @@ Tab& BrowserWindow::create_new_tab(URL const& url, Web::HTML::ActivateTab activa
         create_new_window(url);
     };
 
-    new_tab.on_get_all_cookies = [this](auto& url) {
+    new_tab.view().on_get_all_cookies = [this](auto& url) {
         return m_cookie_jar.get_all_cookies(url);
     };
 
-    new_tab.on_get_named_cookie = [this](auto& url, auto& name) {
+    new_tab.view().on_get_named_cookie = [this](auto& url, auto& name) {
         return m_cookie_jar.get_named_cookie(url, name);
     };
 
-    new_tab.on_get_cookie = [this](auto& url, auto source) -> ByteString {
+    new_tab.view().on_get_cookie = [this](auto& url, auto source) {
         return m_cookie_jar.get_cookie(url, source);
     };
 
-    new_tab.on_set_cookie = [this](auto& url, auto& cookie, auto source) {
+    new_tab.view().on_set_cookie = [this](auto& url, auto& cookie, auto source) {
         m_cookie_jar.set_cookie(url, cookie, source);
     };
 
-    new_tab.on_dump_cookies = [this]() {
-        m_cookie_jar.dump_cookies();
-    };
-
-    new_tab.on_update_cookie = [this](auto cookie) {
-        m_cookie_jar.update_cookie(move(cookie));
+    new_tab.view().on_update_cookie = [this](auto const& cookie) {
+        m_cookie_jar.update_cookie(cookie);
     };
 
     new_tab.on_get_cookies_entries = [this]() {
@@ -624,7 +650,7 @@ Tab& BrowserWindow::create_new_tab(URL const& url, Web::HTML::ActivateTab activa
     return new_tab;
 }
 
-void BrowserWindow::create_new_window(URL const& url)
+void BrowserWindow::create_new_window(URL::URL const& url)
 {
     GUI::Process::spawn_or_show_error(this, "/bin/Browser"sv, Array { url.to_byte_string() });
 }
@@ -724,6 +750,11 @@ void BrowserWindow::event(Core::Event& event)
     case GUI::Event::Resize:
         broadcast_window_size(static_cast<GUI::ResizeEvent&>(event).size());
         break;
+    case GUI::Event::WindowCloseRequest:
+        // FIXME: If we have multiple browser windows, this won't be correct anymore
+        //     For now, this makes sure that we close the TaskManagerWindow when the user clicks the (X) button
+        close_task_manager_window();
+        break;
     default:
         break;
     }
@@ -742,6 +773,28 @@ void BrowserWindow::update_displayed_zoom_level()
 {
     active_tab().update_reset_zoom_button();
     update_zoom_menu();
+}
+
+void BrowserWindow::show_task_manager_window()
+{
+    if (!m_task_manager_window) {
+        m_task_manager_window = GUI::Window::construct();
+        m_task_manager_window->set_window_mode(GUI::WindowMode::Modeless);
+        m_task_manager_window->resize(600, 400);
+        m_task_manager_window->set_title("Task Manager");
+
+        (void)m_task_manager_window->set_main_widget<TaskManagerWidget>();
+    }
+
+    m_task_manager_window->show();
+    m_task_manager_window->move_to_front();
+}
+
+void BrowserWindow::close_task_manager_window()
+{
+    if (m_task_manager_window) {
+        m_task_manager_window->close();
+    }
 }
 
 }

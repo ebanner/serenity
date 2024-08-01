@@ -95,16 +95,7 @@ private:
     Vector<WebView::SearchEngine> m_search_engines;
 };
 
-ErrorOr<NonnullRefPtr<BrowserSettingsWidget>> BrowserSettingsWidget::create()
-{
-    auto widget = TRY(BrowserSettingsWidget::try_create());
-
-    TRY(widget->setup());
-
-    return widget;
-}
-
-ErrorOr<void> BrowserSettingsWidget::setup()
+ErrorOr<void> BrowserSettingsWidget::initialize()
 {
     m_homepage_url_textbox = find_descendant_of_type_named<GUI::TextBox>("homepage_url_textbox");
     m_homepage_url_textbox->set_text(Config::read_string("Browser"sv, "Preferences"sv, "Home"sv, Browser::default_homepage_url), GUI::AllowCallback::No);
@@ -206,7 +197,7 @@ void BrowserSettingsWidget::set_search_engine_url(StringView url)
 void BrowserSettingsWidget::apply_settings()
 {
     auto homepage_url = m_homepage_url_textbox->text();
-    if (!URL(homepage_url).is_valid()) {
+    if (!URL::URL(homepage_url).is_valid()) {
         GUI::MessageBox::show_error(this->window(), "The homepage URL you have entered is not valid"sv);
         m_homepage_url_textbox->select_all();
         m_homepage_url_textbox->set_focus(true);
@@ -215,7 +206,7 @@ void BrowserSettingsWidget::apply_settings()
     Config::write_string("Browser"sv, "Preferences"sv, "Home"sv, homepage_url);
 
     auto new_tab_url = m_new_tab_url_textbox->text();
-    if (!URL(new_tab_url).is_valid()) {
+    if (!URL::URL(new_tab_url).is_valid()) {
         GUI::MessageBox::show_error(this->window(), "The new tab URL you have entered is not valid"sv);
         m_new_tab_url_textbox->select_all();
         m_new_tab_url_textbox->set_focus(true);

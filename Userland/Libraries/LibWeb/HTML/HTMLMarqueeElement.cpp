@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLMarqueeElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
@@ -24,7 +25,7 @@ HTMLMarqueeElement::~HTMLMarqueeElement() = default;
 void HTMLMarqueeElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLMarqueeElementPrototype>(realm, "HTMLMarqueeElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLMarqueeElement);
 }
 
 void HTMLMarqueeElement::apply_presentational_hints(CSS::StyleProperties& style) const

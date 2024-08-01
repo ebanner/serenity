@@ -7,11 +7,11 @@
 
 #include <AK/String.h>
 #include <AK/StringBuilder.h>
-#include <AK/URLParser.h>
 #include <LibJS/Heap/MarkedVector.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/PropertyDescriptor.h>
 #include <LibJS/Runtime/PropertyKey.h>
+#include <LibURL/Parser.h>
 #include <LibWeb/Bindings/LocationPrototype.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
@@ -35,14 +35,13 @@ Location::~Location() = default;
 void Location::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    for (auto& property : m_default_properties)
-        visitor.visit(property);
+    visitor.visit(m_default_properties);
 }
 
 void Location::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::LocationPrototype>(realm, "Location"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(Location);
 
     // FIXME: Implement steps 2.-4.
 
@@ -61,20 +60,8 @@ JS::GCPtr<DOM::Document> Location::relevant_document() const
     return browsing_context ? browsing_context->active_document() : nullptr;
 }
 
-static Bindings::NavigationHistoryBehavior to_navigation_history_behavior(HistoryHandlingBehavior b)
-{
-    switch (b) {
-    case HistoryHandlingBehavior::Push:
-        return Bindings::NavigationHistoryBehavior::Push;
-    case HistoryHandlingBehavior::Replace:
-        return Bindings::NavigationHistoryBehavior::Replace;
-    default:
-        return Bindings::NavigationHistoryBehavior::Auto;
-    }
-}
-
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#location-object-navigate
-WebIDL::ExceptionOr<void> Location::navigate(AK::URL url, HistoryHandlingBehavior history_handling)
+WebIDL::ExceptionOr<void> Location::navigate(URL::URL url, Bindings::NavigationHistoryBehavior history_handling)
 {
     // 1. Let navigable be location's relevant global object's navigable.
     auto navigable = verify_cast<HTML::Window>(HTML::relevant_global_object(*this)).navigable();
@@ -84,20 +71,20 @@ WebIDL::ExceptionOr<void> Location::navigate(AK::URL url, HistoryHandlingBehavio
 
     // 3. If location's relevant Document is not yet completely loaded, and the incumbent global object does not have transient activation, then set historyHandling to "replace".
     if (!relevant_document()->is_completely_loaded() && !verify_cast<HTML::Window>(incumbent_global_object()).has_transient_activation()) {
-        history_handling = HistoryHandlingBehavior::Replace;
+        history_handling = Bindings::NavigationHistoryBehavior::Replace;
     }
 
     // 4. Navigate navigable to url using sourceDocument, with exceptionsEnabled set to true and historyHandling set to historyHandling.
     TRY(navigable->navigate({ .url = url,
         .source_document = source_document,
         .exceptions_enabled = true,
-        .history_handling = to_navigation_history_behavior(history_handling) }));
+        .history_handling = history_handling }));
 
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/history.html#concept-location-url
-AK::URL Location::url() const
+URL::URL Location::url() const
 {
     // A Location object has an associated url, which is this Location object's relevant Document's URL,
     // if this Location object's relevant Document is non-null, and about:blank otherwise.
@@ -348,7 +335,7 @@ WebIDL::ExceptionOr<void> Location::set_hash(String const& value)
     copy_url.set_fragment(String {});
 
     // 6. Basic URL parse input, with copyURL as url and fragment state as state override.
-    auto result_url = URLParser::basic_parse(input, {}, copy_url, URLParser::State::Fragment);
+    copy_url = URL::Parser::basic_parse(input, {}, copy_url, URL::Parser::State::Fragment);
 
     // 7. If copyURL's fragment is this's url's fragment, then return.
     if (copy_url.fragment() == this->url().fragment())
@@ -389,7 +376,7 @@ WebIDL::ExceptionOr<void> Location::replace(String const& url)
         return WebIDL::SyntaxError::create(realm(), MUST(String::formatted("Invalid URL '{}'", url)));
 
     // 3. Location-object navigate this to the resulting URL record given "replace".
-    TRY(navigate(replace_url, HistoryHandlingBehavior::Replace));
+    TRY(navigate(replace_url, Bindings::NavigationHistoryBehavior::Replace));
 
     return {};
 }
@@ -496,13 +483,13 @@ JS::ThrowCompletionOr<bool> Location::internal_define_own_property(JS::PropertyK
 }
 
 // 7.10.5.7 [[Get]] ( P, Receiver ), https://html.spec.whatwg.org/multipage/history.html#location-get
-JS::ThrowCompletionOr<JS::Value> Location::internal_get(JS::PropertyKey const& property_key, JS::Value receiver, JS::CacheablePropertyMetadata* cacheable_metadata) const
+JS::ThrowCompletionOr<JS::Value> Location::internal_get(JS::PropertyKey const& property_key, JS::Value receiver, JS::CacheablePropertyMetadata* cacheable_metadata, PropertyLookupPhase phase) const
 {
     auto& vm = this->vm();
 
     // 1. If IsPlatformObjectSameOrigin(this) is true, then return ? OrdinaryGet(this, P, Receiver).
     if (HTML::is_platform_object_same_origin(*this))
-        return JS::Object::internal_get(property_key, receiver, cacheable_metadata);
+        return JS::Object::internal_get(property_key, receiver, cacheable_metadata, phase);
 
     // 2. Return ? CrossOriginGet(this, P, Receiver).
     return HTML::cross_origin_get(vm, static_cast<JS::Object const&>(*this), property_key, receiver);

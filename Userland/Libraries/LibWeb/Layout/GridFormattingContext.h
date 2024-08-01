@@ -53,6 +53,11 @@ struct GridItem {
     [[nodiscard]] int gap_adjusted_column(Box const& grid_box) const;
 };
 
+enum class FoundUnoccupiedPlace {
+    No,
+    Yes
+};
+
 class OccupationGrid {
 public:
     OccupationGrid(size_t columns_count, size_t rows_count)
@@ -83,6 +88,8 @@ public:
 
     bool is_occupied(int column_index, int row_index) const;
 
+    FoundUnoccupiedPlace find_unoccupied_place(GridDimension dimension, int& column_index, int& row_index, int column_span, int row_span) const;
+
 private:
     HashTable<GridPosition> m_occupation_grid;
 
@@ -112,8 +119,7 @@ private:
     void resolve_items_box_metrics(GridDimension const dimension);
 
     CSSPixels m_automatic_content_height { 0 };
-    bool is_auto_positioned_row(CSS::GridTrackPlacement const&, CSS::GridTrackPlacement const&) const;
-    bool is_auto_positioned_column(CSS::GridTrackPlacement const&, CSS::GridTrackPlacement const&) const;
+
     bool is_auto_positioned_track(CSS::GridTrackPlacement const&, CSS::GridTrackPlacement const&) const;
 
     struct GridTrack {
@@ -248,11 +254,19 @@ private:
 
     void build_grid_areas();
 
+    struct PlacementPosition {
+        int start { 0 };
+        int end { 0 };
+        size_t span { 1 };
+    };
+    PlacementPosition resolve_grid_position(Box const& child_box, GridDimension const dimension);
+
     void place_grid_items();
     void place_item_with_row_and_column_position(Box const& child_box);
     void place_item_with_row_position(Box const& child_box);
     void place_item_with_column_position(Box const& child_box, int& auto_placement_cursor_x, int& auto_placement_cursor_y);
     void place_item_with_no_declared_position(Box const& child_box, int& auto_placement_cursor_x, int& auto_placement_cursor_y);
+    void record_grid_placement(GridItem);
 
     void initialize_grid_tracks_from_definition(GridDimension);
     void initialize_grid_tracks_for_columns_and_rows();

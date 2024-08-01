@@ -21,10 +21,6 @@ namespace Web::DOM {
 // The filter is a simple Function object that answers the question
 // "is this Element part of the collection?"
 
-// FIXME: HTMLCollection currently does no caching. It will re-filter on every access!
-//        We should teach it how to cache results. The main challenge is invalidating
-//        these caches, since this needs to happen on various kinds of DOM mutation.
-
 class HTMLCollection : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(HTMLCollection, Bindings::PlatformObject);
     JS_DECLARE_ALLOCATOR(HTMLCollection);
@@ -34,15 +30,15 @@ public:
         Children,
         Descendants,
     };
-    [[nodiscard]] static JS::NonnullGCPtr<HTMLCollection> create(ParentNode& root, Scope, Function<bool(Element const&)> filter);
+    [[nodiscard]] static JS::NonnullGCPtr<HTMLCollection> create(ParentNode& root, Scope, ESCAPING Function<bool(Element const&)> filter);
 
     virtual ~HTMLCollection() override;
 
     size_t length() const;
     Element* item(size_t index) const;
-    Element* named_item(FlyString const& name) const;
+    Element* named_item(FlyString const& key) const;
 
-    JS::MarkedVector<Element*> collect_matching_elements() const;
+    JS::MarkedVector<JS::NonnullGCPtr<Element>> collect_matching_elements() const;
 
     virtual WebIDL::ExceptionOr<JS::Value> item_value(size_t index) const override;
     virtual WebIDL::ExceptionOr<JS::Value> named_item_value(FlyString const& name) const override;
@@ -50,7 +46,7 @@ public:
     virtual bool is_supported_property_index(u32) const override;
 
 protected:
-    HTMLCollection(ParentNode& root, Scope, Function<bool(Element const&)> filter);
+    HTMLCollection(ParentNode& root, Scope, ESCAPING Function<bool(Element const&)> filter);
 
     virtual void initialize(JS::Realm&) override;
 
@@ -59,6 +55,11 @@ protected:
 
 private:
     virtual void visit_edges(Cell::Visitor&) override;
+
+    void update_cache_if_needed() const;
+
+    mutable u64 m_cached_dom_tree_version { 0 };
+    mutable Vector<JS::NonnullGCPtr<Element>> m_cached_elements;
 
     JS::NonnullGCPtr<ParentNode> m_root;
     Function<bool(Element const&)> m_filter;

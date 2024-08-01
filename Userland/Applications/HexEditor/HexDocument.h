@@ -7,8 +7,10 @@
 
 #pragma once
 
+#include "AnnotationsModel.h"
 #include <AK/HashMap.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/Time.h>
 #include <AK/Types.h>
@@ -18,14 +20,6 @@
 #include <LibGfx/Color.h>
 
 constexpr Duration COMMAND_COMMIT_TIME = Duration::from_milliseconds(400);
-
-struct Annotation {
-    size_t start_offset { 0 };
-    size_t end_offset { 0 };
-    Gfx::Color background_color { Color::from_argb(0xfffce94f) };
-
-    bool operator==(Annotation const& other) const = default;
-};
 
 class HexDocument : public Weakable<HexDocument> {
 public:
@@ -48,14 +42,13 @@ public:
     virtual bool is_dirty() const;
     virtual void clear_changes() = 0;
 
-    ReadonlySpan<Annotation> annotations() const { return m_annotations; }
-    void add_annotation(Annotation);
-    void delete_annotation(Annotation const&);
-    Optional<Annotation&> closest_annotation_at(size_t position);
+    AnnotationsModel& annotations() { return *m_annotations; }
 
 protected:
+    HexDocument();
+
     HashMap<size_t, u8> m_changes;
-    Vector<Annotation> m_annotations;
+    NonnullRefPtr<AnnotationsModel> m_annotations;
 };
 
 class HexDocumentMemory final : public HexDocument {

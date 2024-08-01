@@ -28,10 +28,13 @@ public:
     virtual ~HTMLLinkElement() override;
 
     virtual void inserted() override;
+    virtual void removed_from(Node* old_parent) override;
 
     String rel() const { return get_attribute_value(HTML::AttributeNames::rel); }
     String type() const { return get_attribute_value(HTML::AttributeNames::type); }
     String href() const { return get_attribute_value(HTML::AttributeNames::href); }
+
+    JS::NonnullGCPtr<DOM::DOMTokenList> rel_list();
 
     bool has_loaded_icon() const;
     bool load_favicon_and_use_if_window_is_active();
@@ -42,7 +45,7 @@ private:
     HTMLLinkElement(DOM::Document&, DOM::QualifiedName);
 
     virtual void initialize(JS::Realm&) override;
-    void attribute_changed(FlyString const&, Optional<String> const&) override;
+    virtual void attribute_changed(FlyString const&, Optional<String> const&) override;
 
     // ^ResourceClient
     virtual void resource_did_fail() override;
@@ -70,12 +73,12 @@ private:
         CORSSettingAttribute crossorigin { CORSSettingAttribute::NoCORS };
         // referrer policy (default the empty string)
         //      A referrer policy
-        Optional<ReferrerPolicy::ReferrerPolicy> referrer_policy {};
+        ReferrerPolicy::ReferrerPolicy referrer_policy { ReferrerPolicy::ReferrerPolicy::EmptyString };
         // FIXME: source set (default null)
         //          Null or a source set
         // base URL
         //      A URL
-        AK::URL base_url;
+        URL::URL base_url;
         // origin
         //      An origin
         HTML::Origin origin;
@@ -90,6 +93,9 @@ private:
         JS::GCPtr<Web::DOM::Document> document;
         // FIXME: on document ready (default null)
         //          Null or an algorithm accepting a Document
+        // fetch priority (default auto)
+        //      A fetch priority attribute state
+        Fetch::Infrastructure::Request::Priority fetch_priority { Fetch::Infrastructure::Request::Priority::Auto };
     };
 
     // https://html.spec.whatwg.org/multipage/semantics.html#create-link-options-from-element
@@ -132,7 +138,10 @@ private:
     JS::GCPtr<CSS::CSSStyleSheet> m_loaded_style_sheet;
 
     Optional<DOM::DocumentLoadEventDelayer> m_document_load_event_delayer;
+    JS::GCPtr<DOM::DOMTokenList> m_rel_list;
     unsigned m_relationship { 0 };
+    // https://html.spec.whatwg.org/multipage/semantics.html#explicitly-enabled
+    bool m_explicitly_enabled { false };
 };
 
 }

@@ -79,7 +79,7 @@ void BytecodeInterpreter::branch_to_label(Configuration& configuration, LabelInd
         configuration.stack().pop();
     }
 
-    for (auto& result : results)
+    for (auto& result : results.in_reverse())
         configuration.stack().push(move(result));
 
     configuration.ip() = label->continuation();
@@ -296,8 +296,8 @@ void BytecodeInterpreter::call_address(Configuration& configuration, FunctionAdd
         configuration.stack().entries().unchecked_append(move(entry));
 }
 
-template<typename PopTypeLHS, typename PushType, typename Operator, typename PopTypeRHS>
-void BytecodeInterpreter::binary_numeric_operation(Configuration& configuration)
+template<typename PopTypeLHS, typename PushType, typename Operator, typename PopTypeRHS, typename... Args>
+void BytecodeInterpreter::binary_numeric_operation(Configuration& configuration, Args&&... args)
 {
     auto rhs_entry = configuration.stack().pop();
     auto& lhs_entry = configuration.stack().peek();
@@ -306,8 +306,8 @@ void BytecodeInterpreter::binary_numeric_operation(Configuration& configuration)
     auto rhs = rhs_ptr->to<PopTypeRHS>();
     auto lhs = lhs_ptr->to<PopTypeLHS>();
     PushType result;
-    auto call_result = Operator {}(lhs.value(), rhs.value());
-    if constexpr (IsSpecializationOf<decltype(call_result), AK::Result>) {
+    auto call_result = Operator { forward<Args>(args)... }(lhs.value(), rhs.value());
+    if constexpr (IsSpecializationOf<decltype(call_result), AK::ErrorOr>) {
         if (call_result.is_error()) {
             trap_if_not(false, call_result.error());
             return;
@@ -320,15 +320,15 @@ void BytecodeInterpreter::binary_numeric_operation(Configuration& configuration)
     lhs_entry = Value(result);
 }
 
-template<typename PopType, typename PushType, typename Operator>
-void BytecodeInterpreter::unary_operation(Configuration& configuration)
+template<typename PopType, typename PushType, typename Operator, typename... Args>
+void BytecodeInterpreter::unary_operation(Configuration& configuration, Args&&... args)
 {
     auto& entry = configuration.stack().peek();
     auto entry_ptr = entry.get_pointer<Value>();
     auto value = entry_ptr->to<PopType>();
-    auto call_result = Operator {}(*value);
+    auto call_result = Operator { forward<Args>(args)... }(*value);
     PushType result;
-    if constexpr (IsSpecializationOf<decltype(call_result), AK::Result>) {
+    if constexpr (IsSpecializationOf<decltype(call_result), AK::ErrorOr>) {
         if (call_result.is_error()) {
             trap_if_not(false, call_result.error());
             return;
@@ -382,12 +382,12 @@ void BytecodeInterpreter::pop_and_store(Configuration& configuration, Instructio
     store_to_memory(configuration, instruction, { &value, sizeof(StoreT) }, *base);
 }
 
-void BytecodeInterpreter::store_to_memory(Configuration& configuration, Instruction const& instruction, ReadonlyBytes data, i32 base)
+void BytecodeInterpreter::store_to_memory(Configuration& configuration, Instruction const& instruction, ReadonlyBytes data, u32 base)
 {
     auto& arg = instruction.arguments().get<Instruction::MemoryArgument>();
     auto& address = configuration.frame().module().memories()[arg.memory_index.value()];
     auto memory = configuration.store().get(address);
-    u64 instance_address = static_cast<u64>(bit_cast<u32>(base)) + arg.offset;
+    u64 instance_address = static_cast<u64>(base) + arg.offset;
     Checked addition { instance_address };
     addition += data.size();
     if (addition.has_overflow() || addition.value() > memory->size()) {
@@ -555,7 +555,7 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
             break;
         case BlockType::Index: {
             auto& type = configuration.frame().module().types()[args.block_type.type_index().value()];
-            arity = type.results().size();
+            arity = type.parameters().size();
             parameter_count = type.parameters().size();
         }
         }
@@ -665,9 +665,8 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
         TRAP_IF_NOT(index.value() >= 0);
         TRAP_IF_NOT(static_cast<size_t>(index.value()) < table_instance->elements().size());
         auto element = table_instance->elements()[index.value()];
-        TRAP_IF_NOT(element.has_value());
-        TRAP_IF_NOT(element->ref().has<Reference::Func>());
-        auto address = element->ref().get<Reference::Func>().address;
+        TRAP_IF_NOT(element.ref().has<Reference::Func>());
+        auto address = element.ref().get<Reference::Func>().address;
         dbgln_if(WASM_TRACE_DEBUG, "call_indirect({} -> {})", index.value(), address.value());
         call_address(configuration, address);
         return;
@@ -772,9 +771,9 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
         auto& args = instruction.arguments().get<Instruction::MemoryIndexArgument>();
         auto address = configuration.frame().module().memories()[args.memory_index.value()];
         auto instance = configuration.store().get(address);
-        auto count = configuration.stack().pop().get<Value>().to<i32>().value();
-        auto value = configuration.stack().pop().get<Value>().to<i32>().value();
-        auto destination_offset = configuration.stack().pop().get<Value>().to<i32>().value();
+        auto count = configuration.stack().pop().get<Value>().to<u32>().value();
+        u8 value = static_cast<u8>(configuration.stack().pop().get<Value>().to<u32>().value());
+        auto destination_offset = configuration.stack().pop().get<Value>().to<u32>().value();
 
         TRAP_IF_NOT(static_cast<size_t>(destination_offset + count) <= instance->data().size());
 
@@ -786,8 +785,8 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
             Instruction::MemoryArgument { 0, 0 }
         };
 
-        for (auto i = 0; i < count; ++i) {
-            store_to_memory(configuration, synthetic_store_instruction, { &value, sizeof(value) }, destination_offset);
+        for (u32 i = 0; i < count; ++i) {
+            store_to_memory(configuration, synthetic_store_instruction, { &value, sizeof(value) }, destination_offset + i);
         }
         return;
     }
@@ -803,8 +802,12 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
         auto source_offset = configuration.stack().pop().get<Value>().to<i32>().value();
         auto destination_offset = configuration.stack().pop().get<Value>().to<i32>().value();
 
-        TRAP_IF_NOT(static_cast<size_t>(source_offset + count) <= source_instance->data().size());
-        TRAP_IF_NOT(static_cast<size_t>(destination_offset + count) <= destination_instance->data().size());
+        Checked<size_t> source_position = source_offset;
+        source_position.saturating_add(count);
+        Checked<size_t> destination_position = destination_offset;
+        destination_position.saturating_add(count);
+        TRAP_IF_NOT(source_position <= source_instance->data().size());
+        TRAP_IF_NOT(destination_position <= destination_instance->data().size());
 
         if (count == 0)
             return;
@@ -833,11 +836,13 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
         auto& args = instruction.arguments().get<Instruction::MemoryInitArgs>();
         auto& data_address = configuration.frame().module().datas()[args.data_index.value()];
         auto& data = *configuration.store().get(data_address);
-        auto count = *configuration.stack().pop().get<Value>().to<i32>();
-        auto source_offset = *configuration.stack().pop().get<Value>().to<i32>();
-        auto destination_offset = *configuration.stack().pop().get<Value>().to<i32>();
+        auto count = *configuration.stack().pop().get<Value>().to<u32>();
+        auto source_offset = *configuration.stack().pop().get<Value>().to<u32>();
+        auto destination_offset = *configuration.stack().pop().get<Value>().to<u32>();
 
-        TRAP_IF_NOT(count > 0);
+        if (count == 0)
+            return;
+
         TRAP_IF_NOT(source_offset + count > 0);
         TRAP_IF_NOT(static_cast<size_t>(source_offset + count) <= data.size());
 
@@ -859,9 +864,55 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
         *configuration.store().get(data_address) = DataInstance({});
         return;
     }
-    case Instructions::table_get.value():
-    case Instructions::table_set.value():
-        goto unimplemented;
+    case Instructions::elem_drop.value(): {
+        auto elem_index = instruction.arguments().get<ElementIndex>();
+        auto address = configuration.frame().module().elements()[elem_index.value()];
+        auto elem = configuration.store().get(address);
+        *configuration.store().get(address) = ElementInstance(elem->type(), {});
+        return;
+    }
+    case Instructions::table_set.value(): {
+        auto ref = *configuration.stack().pop().get<Value>().to<Reference>();
+        auto index = (size_t)(*configuration.stack().pop().get<Value>().to<i32>());
+        auto table_index = instruction.arguments().get<TableIndex>();
+        auto address = configuration.frame().module().tables()[table_index.value()];
+        auto table = configuration.store().get(address);
+        TRAP_IF_NOT(index < table->elements().size());
+        table->elements()[index] = ref;
+        return;
+    }
+    case Instructions::table_get.value(): {
+        auto index = (size_t)(*configuration.stack().pop().get<Value>().to<i32>());
+        auto table_index = instruction.arguments().get<TableIndex>();
+        auto address = configuration.frame().module().tables()[table_index.value()];
+        auto table = configuration.store().get(address);
+        TRAP_IF_NOT(index < table->elements().size());
+        auto ref = table->elements()[index];
+        configuration.stack().push(Value(ref));
+        return;
+    }
+    case Instructions::table_grow.value(): {
+        auto size = *configuration.stack().pop().get<Value>().to<u32>();
+        auto fill_value = *configuration.stack().pop().get<Value>().to<Reference>();
+        auto table_index = instruction.arguments().get<TableIndex>();
+        auto address = configuration.frame().module().tables()[table_index.value()];
+        auto table = configuration.store().get(address);
+        auto previous_size = table->elements().size();
+        auto did_grow = table->grow(size, fill_value);
+        if (!did_grow) {
+            configuration.stack().push(Value((i32)-1));
+        } else {
+            configuration.stack().push(Value((i32)previous_size));
+        }
+        return;
+    }
+    case Instructions::table_size.value(): {
+        auto table_index = instruction.arguments().get<TableIndex>();
+        auto address = configuration.frame().module().tables()[table_index.value()];
+        auto table = configuration.store().get(address);
+        configuration.stack().push(Value((i32)table->elements().size()));
+        return;
+    }
     case Instructions::ref_null.value(): {
         auto type = instruction.arguments().get<ValueType>();
         configuration.stack().push(Value(Reference(Reference::Null { type })));
@@ -1241,14 +1292,300 @@ void BytecodeInterpreter::interpret(Configuration& configuration, InstructionPoi
         return binary_numeric_operation<u128, u128, Operators::VectorShiftRight<2, MakeUnsigned>, i32>(configuration);
     case Instructions::i64x2_shr_s.value():
         return binary_numeric_operation<u128, u128, Operators::VectorShiftRight<2, MakeSigned>, i32>(configuration);
+    case Instructions::i8x16_swizzle.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorSwizzle>(configuration);
+    case Instructions::i8x16_extract_lane_s.value():
+        return unary_operation<u128, i8, Operators::VectorExtractLane<16, MakeSigned>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i8x16_extract_lane_u.value():
+        return unary_operation<u128, u8, Operators::VectorExtractLane<16, MakeUnsigned>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i16x8_extract_lane_s.value():
+        return unary_operation<u128, i16, Operators::VectorExtractLane<8, MakeSigned>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i16x8_extract_lane_u.value():
+        return unary_operation<u128, u16, Operators::VectorExtractLane<8, MakeUnsigned>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i32x4_extract_lane.value():
+        return unary_operation<u128, i32, Operators::VectorExtractLane<4, MakeSigned>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i64x2_extract_lane.value():
+        return unary_operation<u128, i64, Operators::VectorExtractLane<2, MakeSigned>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::f32x4_extract_lane.value():
+        return unary_operation<u128, float, Operators::VectorExtractLaneFloat<4>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::f64x2_extract_lane.value():
+        return unary_operation<u128, double, Operators::VectorExtractLaneFloat<2>>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i8x16_replace_lane.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<16, i32>, i32>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i16x8_replace_lane.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<8, i32>, i32>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i32x4_replace_lane.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<4>, i32>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i64x2_replace_lane.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<2>, i64>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::f32x4_replace_lane.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<4, float>, float>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::f64x2_replace_lane.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorReplaceLane<2, double>, double>(configuration, instruction.arguments().get<Instruction::LaneIndex>().lane);
+    case Instructions::i8x16_eq.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::Equals>>(configuration);
+    case Instructions::i8x16_ne.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::NotEquals>>(configuration);
+    case Instructions::i8x16_lt_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThan, MakeSigned>>(configuration);
+    case Instructions::i8x16_lt_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThan, MakeUnsigned>>(configuration);
+    case Instructions::i8x16_gt_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThan, MakeSigned>>(configuration);
+    case Instructions::i8x16_gt_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThan, MakeUnsigned>>(configuration);
+    case Instructions::i8x16_le_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThanOrEquals, MakeSigned>>(configuration);
+    case Instructions::i8x16_le_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::LessThanOrEquals, MakeUnsigned>>(configuration);
+    case Instructions::i8x16_ge_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThanOrEquals, MakeSigned>>(configuration);
+    case Instructions::i8x16_ge_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<16, Operators::GreaterThanOrEquals, MakeUnsigned>>(configuration);
+    case Instructions::i16x8_eq.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::Equals>>(configuration);
+    case Instructions::i16x8_ne.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::NotEquals>>(configuration);
+    case Instructions::i16x8_lt_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThan, MakeSigned>>(configuration);
+    case Instructions::i16x8_lt_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThan, MakeUnsigned>>(configuration);
+    case Instructions::i16x8_gt_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThan, MakeSigned>>(configuration);
+    case Instructions::i16x8_gt_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThan, MakeUnsigned>>(configuration);
+    case Instructions::i16x8_le_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThanOrEquals, MakeSigned>>(configuration);
+    case Instructions::i16x8_le_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::LessThanOrEquals, MakeUnsigned>>(configuration);
+    case Instructions::i16x8_ge_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThanOrEquals, MakeSigned>>(configuration);
+    case Instructions::i16x8_ge_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<8, Operators::GreaterThanOrEquals, MakeUnsigned>>(configuration);
+    case Instructions::i32x4_eq.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::Equals>>(configuration);
+    case Instructions::i32x4_ne.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::NotEquals>>(configuration);
+    case Instructions::i32x4_lt_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThan, MakeSigned>>(configuration);
+    case Instructions::i32x4_lt_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThan, MakeUnsigned>>(configuration);
+    case Instructions::i32x4_gt_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThan, MakeSigned>>(configuration);
+    case Instructions::i32x4_gt_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThan, MakeUnsigned>>(configuration);
+    case Instructions::i32x4_le_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThanOrEquals, MakeSigned>>(configuration);
+    case Instructions::i32x4_le_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::LessThanOrEquals, MakeUnsigned>>(configuration);
+    case Instructions::i32x4_ge_s.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThanOrEquals, MakeSigned>>(configuration);
+    case Instructions::i32x4_ge_u.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorCmpOp<4, Operators::GreaterThanOrEquals, MakeUnsigned>>(configuration);
+    case Instructions::f32x4_eq.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::Equals>>(configuration);
+    case Instructions::f32x4_ne.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::NotEquals>>(configuration);
+    case Instructions::f32x4_lt.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::LessThan>>(configuration);
+    case Instructions::f32x4_gt.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::GreaterThan>>(configuration);
+    case Instructions::f32x4_le.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::LessThanOrEquals>>(configuration);
+    case Instructions::f32x4_ge.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::GreaterThanOrEquals>>(configuration);
+    case Instructions::f32x4_min.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::Minimum>>(configuration);
+    case Instructions::f32x4_max.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<4, Operators::Maximum>>(configuration);
+    case Instructions::f64x2_eq.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::Equals>>(configuration);
+    case Instructions::f64x2_ne.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::NotEquals>>(configuration);
+    case Instructions::f64x2_lt.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::LessThan>>(configuration);
+    case Instructions::f64x2_gt.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::GreaterThan>>(configuration);
+    case Instructions::f64x2_le.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::LessThanOrEquals>>(configuration);
+    case Instructions::f64x2_ge.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::GreaterThanOrEquals>>(configuration);
+    case Instructions::f64x2_min.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::Minimum>>(configuration);
+    case Instructions::f64x2_max.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatCmpOp<2, Operators::Maximum>>(configuration);
+    case Instructions::f32x4_div.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Divide>>(configuration);
+    case Instructions::f32x4_mul.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Multiply>>(configuration);
+    case Instructions::f32x4_sub.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Subtract>>(configuration);
+    case Instructions::f32x4_add.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::Add>>(configuration);
+    case Instructions::f32x4_pmin.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::PseudoMinimum>>(configuration);
+    case Instructions::f32x4_pmax.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<4, Operators::PseudoMaximum>>(configuration);
+    case Instructions::f64x2_div.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Divide>>(configuration);
+    case Instructions::f64x2_mul.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Multiply>>(configuration);
+    case Instructions::f64x2_sub.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Subtract>>(configuration);
+    case Instructions::f64x2_add.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::Add>>(configuration);
+    case Instructions::f64x2_pmin.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::PseudoMinimum>>(configuration);
+    case Instructions::f64x2_pmax.value():
+        return binary_numeric_operation<u128, u128, Operators::VectorFloatBinaryOp<2, Operators::PseudoMaximum>>(configuration);
+    case Instructions::f32x4_ceil.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Ceil>>(configuration);
+    case Instructions::f32x4_floor.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Floor>>(configuration);
+    case Instructions::f32x4_trunc.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Truncate>>(configuration);
+    case Instructions::f32x4_nearest.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::NearbyIntegral>>(configuration);
+    case Instructions::f32x4_sqrt.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::SquareRoot>>(configuration);
+    case Instructions::f32x4_neg.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Negate>>(configuration);
+    case Instructions::f32x4_abs.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<4, Operators::Absolute>>(configuration);
+    case Instructions::f64x2_ceil.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Ceil>>(configuration);
+    case Instructions::f64x2_floor.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Floor>>(configuration);
+    case Instructions::f64x2_trunc.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Truncate>>(configuration);
+    case Instructions::f64x2_nearest.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::NearbyIntegral>>(configuration);
+    case Instructions::f64x2_sqrt.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::SquareRoot>>(configuration);
+    case Instructions::f64x2_neg.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Negate>>(configuration);
+    case Instructions::f64x2_abs.value():
+        return unary_operation<u128, u128, Operators::VectorFloatUnaryOp<2, Operators::Absolute>>(configuration);
+    case Instructions::v128_not.value():
+    case Instructions::v128_and.value():
+    case Instructions::v128_andnot.value():
+    case Instructions::v128_or.value():
+    case Instructions::v128_xor.value():
+    case Instructions::v128_bitselect.value():
+    case Instructions::v128_any_true.value():
+    case Instructions::v128_load8_lane.value():
+    case Instructions::v128_load16_lane.value():
+    case Instructions::v128_load32_lane.value():
+    case Instructions::v128_load64_lane.value():
+    case Instructions::v128_store8_lane.value():
+    case Instructions::v128_store16_lane.value():
+    case Instructions::v128_store32_lane.value():
+    case Instructions::v128_store64_lane.value():
+    case Instructions::v128_load32_zero.value():
+    case Instructions::v128_load64_zero.value():
+    case Instructions::f32x4_demote_f64x2_zero.value():
+    case Instructions::f64x2_promote_low_f32x4.value():
+    case Instructions::i8x16_abs.value():
+    case Instructions::i8x16_neg.value():
+    case Instructions::i8x16_popcnt.value():
+    case Instructions::i8x16_all_true.value():
+    case Instructions::i8x16_bitmask.value():
+    case Instructions::i8x16_narrow_i16x8_s.value():
+    case Instructions::i8x16_narrow_i16x8_u.value():
+    case Instructions::i8x16_add.value():
+    case Instructions::i8x16_add_sat_s.value():
+    case Instructions::i8x16_add_sat_u.value():
+    case Instructions::i8x16_sub.value():
+    case Instructions::i8x16_sub_sat_s.value():
+    case Instructions::i8x16_sub_sat_u.value():
+    case Instructions::i8x16_min_s.value():
+    case Instructions::i8x16_min_u.value():
+    case Instructions::i8x16_max_s.value():
+    case Instructions::i8x16_max_u.value():
+    case Instructions::i8x16_avgr_u.value():
+    case Instructions::i16x8_extadd_pairwise_i8x16_s.value():
+    case Instructions::i16x8_extadd_pairwise_i8x16_u.value():
+    case Instructions::i32x4_extadd_pairwise_i16x8_s.value():
+    case Instructions::i32x4_extadd_pairwise_i16x8_u.value():
+    case Instructions::i16x8_abs.value():
+    case Instructions::i16x8_neg.value():
+    case Instructions::i16x8_q15mulr_sat_s.value():
+    case Instructions::i16x8_all_true.value():
+    case Instructions::i16x8_bitmask.value():
+    case Instructions::i16x8_narrow_i32x4_s.value():
+    case Instructions::i16x8_narrow_i32x4_u.value():
+    case Instructions::i16x8_extend_low_i8x16_s.value():
+    case Instructions::i16x8_extend_high_i8x16_s.value():
+    case Instructions::i16x8_extend_low_i8x16_u.value():
+    case Instructions::i16x8_extend_high_i8x16_u.value():
+    case Instructions::i16x8_add.value():
+    case Instructions::i16x8_add_sat_s.value():
+    case Instructions::i16x8_add_sat_u.value():
+    case Instructions::i16x8_sub.value():
+    case Instructions::i16x8_sub_sat_s.value():
+    case Instructions::i16x8_sub_sat_u.value():
+    case Instructions::i16x8_mul.value():
+    case Instructions::i16x8_min_s.value():
+    case Instructions::i16x8_min_u.value():
+    case Instructions::i16x8_max_s.value():
+    case Instructions::i16x8_max_u.value():
+    case Instructions::i16x8_avgr_u.value():
+    case Instructions::i16x8_extmul_low_i8x16_s.value():
+    case Instructions::i16x8_extmul_high_i8x16_s.value():
+    case Instructions::i16x8_extmul_low_i8x16_u.value():
+    case Instructions::i16x8_extmul_high_i8x16_u.value():
+    case Instructions::i32x4_abs.value():
+    case Instructions::i32x4_neg.value():
+    case Instructions::i32x4_all_true.value():
+    case Instructions::i32x4_bitmask.value():
+    case Instructions::i32x4_extend_low_i16x8_s.value():
+    case Instructions::i32x4_extend_high_i16x8_s.value():
+    case Instructions::i32x4_extend_low_i16x8_u.value():
+    case Instructions::i32x4_extend_high_i16x8_u.value():
+    case Instructions::i32x4_add.value():
+    case Instructions::i32x4_sub.value():
+    case Instructions::i32x4_mul.value():
+    case Instructions::i32x4_min_s.value():
+    case Instructions::i32x4_min_u.value():
+    case Instructions::i32x4_max_s.value():
+    case Instructions::i32x4_max_u.value():
+    case Instructions::i32x4_dot_i16x8_s.value():
+    case Instructions::i32x4_extmul_low_i16x8_s.value():
+    case Instructions::i32x4_extmul_high_i16x8_s.value():
+    case Instructions::i32x4_extmul_low_i16x8_u.value():
+    case Instructions::i32x4_extmul_high_i16x8_u.value():
+    case Instructions::i64x2_abs.value():
+    case Instructions::i64x2_neg.value():
+    case Instructions::i64x2_all_true.value():
+    case Instructions::i64x2_bitmask.value():
+    case Instructions::i64x2_extend_low_i32x4_s.value():
+    case Instructions::i64x2_extend_high_i32x4_s.value():
+    case Instructions::i64x2_extend_low_i32x4_u.value():
+    case Instructions::i64x2_extend_high_i32x4_u.value():
+    case Instructions::i64x2_sub.value():
+    case Instructions::i64x2_mul.value():
+    case Instructions::i64x2_eq.value():
+    case Instructions::i64x2_ne.value():
+    case Instructions::i64x2_lt_s.value():
+    case Instructions::i64x2_gt_s.value():
+    case Instructions::i64x2_le_s.value():
+    case Instructions::i64x2_ge_s.value():
+    case Instructions::i64x2_extmul_low_i32x4_s.value():
+    case Instructions::i64x2_extmul_high_i32x4_s.value():
+    case Instructions::i64x2_extmul_low_i32x4_u.value():
+    case Instructions::i64x2_extmul_high_i32x4_u.value():
+    case Instructions::i32x4_trunc_sat_f32x4_s.value():
+    case Instructions::i32x4_trunc_sat_f32x4_u.value():
+    case Instructions::f32x4_convert_i32x4_s.value():
+    case Instructions::f32x4_convert_i32x4_u.value():
+    case Instructions::i32x4_trunc_sat_f64x2_s_zero.value():
+    case Instructions::i32x4_trunc_sat_f64x2_u_zero.value():
+    case Instructions::f64x2_convert_low_i32x4_s.value():
+    case Instructions::f64x2_convert_low_i32x4_u.value():
     case Instructions::table_init.value():
-    case Instructions::elem_drop.value():
     case Instructions::table_copy.value():
-    case Instructions::table_grow.value():
-    case Instructions::table_size.value():
     case Instructions::table_fill.value():
     default:
-    unimplemented:;
         dbgln_if(WASM_TRACE_DEBUG, "Instruction '{}' not implemented", instruction_name(instruction.opcode()));
         m_trap = Trap { ByteString::formatted("Unimplemented instruction {}", instruction_name(instruction.opcode())) };
         return;

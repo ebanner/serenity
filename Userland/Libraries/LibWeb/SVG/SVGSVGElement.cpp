@@ -5,16 +5,20 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/SVGSVGElementPrototype.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/DOM/StaticNodeList.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/Layout/SVGSVGBox.h>
 #include <LibWeb/SVG/AttributeNames.h>
+#include <LibWeb/SVG/SVGAnimatedRect.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
+#include <LibWeb/Selection/Selection.h>
 
 namespace Web::SVG {
 
@@ -28,7 +32,14 @@ SVGSVGElement::SVGSVGElement(DOM::Document& document, DOM::QualifiedName qualifi
 void SVGSVGElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::SVGSVGElementPrototype>(realm, "SVGSVGElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(SVGSVGElement);
+    m_view_box_for_bindings = heap().allocate<SVGAnimatedRect>(realm, realm);
+}
+
+void SVGSVGElement::visit_edges(Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_view_box_for_bindings);
 }
 
 JS::GCPtr<Layout::Node> SVGSVGElement::create_layout_node(NonnullRefPtr<CSS::StyleProperties> style)
@@ -39,9 +50,19 @@ JS::GCPtr<Layout::Node> SVGSVGElement::create_layout_node(NonnullRefPtr<CSS::Sty
 void SVGSVGElement::apply_presentational_hints(CSS::StyleProperties& style) const
 {
     Base::apply_presentational_hints(style);
+    auto parsing_context = CSS::Parser::ParsingContext { document(), CSS::Parser::ParsingContext::Mode::SVGPresentationAttribute };
+
+    auto x_attribute = attribute(SVG::AttributeNames::x);
+    if (auto x_value = parse_css_value(parsing_context, x_attribute.value_or(String {}), CSS::PropertyID::X)) {
+        style.set_property(CSS::PropertyID::X, x_value.release_nonnull());
+    }
+
+    auto y_attribute = attribute(SVG::AttributeNames::y);
+    if (auto y_value = parse_css_value(parsing_context, y_attribute.value_or(String {}), CSS::PropertyID::Y)) {
+        style.set_property(CSS::PropertyID::Y, y_value.release_nonnull());
+    }
 
     auto width_attribute = attribute(SVG::AttributeNames::width);
-    auto parsing_context = CSS::Parser::ParsingContext { document(), CSS::Parser::ParsingContext::Mode::SVGPresentationAttribute };
     if (auto width_value = parse_css_value(parsing_context, width_attribute.value_or(String {}), CSS::PropertyID::Width)) {
         style.set_property(CSS::PropertyID::Width, width_value.release_nonnull());
     } else if (width_attribute == "") {
@@ -67,8 +88,18 @@ void SVGSVGElement::attribute_changed(FlyString const& name, Optional<String> co
 {
     SVGGraphicsElement::attribute_changed(name, value);
 
-    if (name.equals_ignoring_ascii_case(SVG::AttributeNames::viewBox))
-        m_view_box = try_parse_view_box(value.value_or(String {}));
+    if (name.equals_ignoring_ascii_case(SVG::AttributeNames::viewBox)) {
+        if (!value.has_value()) {
+            m_view_box_for_bindings->set_nulled(true);
+        } else {
+            m_view_box = try_parse_view_box(value.value_or(String {}));
+            m_view_box_for_bindings->set_nulled(!m_view_box.has_value());
+            if (m_view_box.has_value()) {
+                m_view_box_for_bindings->set_base_val(Gfx::DoubleRect { m_view_box->min_x, m_view_box->min_y, m_view_box->width, m_view_box->height });
+                m_view_box_for_bindings->set_anim_val(Gfx::DoubleRect { m_view_box->min_x, m_view_box->min_y, m_view_box->width, m_view_box->height });
+            }
+        }
+    }
     if (name.equals_ignoring_ascii_case(SVG::AttributeNames::preserveAspectRatio))
         m_preserve_aspect_ratio = AttributeParser::parse_preserve_aspect_ratio(value.value_or(String {}));
     if (name.equals_ignoring_ascii_case(SVG::AttributeNames::width) || name.equals_ignoring_ascii_case(SVG::AttributeNames::height))
@@ -119,6 +150,103 @@ Optional<ViewBox> SVGSVGElement::view_box() const
         return m_fallback_view_box_for_svg_as_image;
 
     return {};
+}
+
+JS::NonnullGCPtr<SVGAnimatedLength> SVGSVGElement::x() const
+{
+    return svg_animated_length_for_property(CSS::PropertyID::X);
+}
+
+JS::NonnullGCPtr<SVGAnimatedLength> SVGSVGElement::y() const
+{
+    return svg_animated_length_for_property(CSS::PropertyID::Y);
+}
+
+JS::NonnullGCPtr<SVGAnimatedLength> SVGSVGElement::width() const
+{
+    return svg_animated_length_for_property(CSS::PropertyID::Width);
+}
+
+JS::NonnullGCPtr<SVGAnimatedLength> SVGSVGElement::height() const
+{
+    return svg_animated_length_for_property(CSS::PropertyID::Height);
+}
+
+float SVGSVGElement::current_scale() const
+{
+    dbgln("(STUBBED) SVGSVGElement::current_scale(). Called on: {}", debug_description());
+    return 1.0f;
+}
+
+void SVGSVGElement::set_current_scale(float)
+{
+    dbgln("(STUBBED) SVGSVGElement::set_current_scale(). Called on: {}", debug_description());
+}
+
+JS::NonnullGCPtr<Geometry::DOMPointReadOnly> SVGSVGElement::current_translate() const
+{
+    dbgln("(STUBBED) SVGSVGElement::current_translate(). Called on: {}", debug_description());
+    return Geometry::DOMPointReadOnly::create(realm());
+}
+
+JS::NonnullGCPtr<DOM::NodeList> SVGSVGElement::get_intersection_list(JS::NonnullGCPtr<Geometry::DOMRectReadOnly>, JS::GCPtr<SVGElement>) const
+{
+    dbgln("(STUBBED) SVGSVGElement::get_intersection_list(). Called on: {}", debug_description());
+    return DOM::StaticNodeList::create(realm(), {});
+}
+
+JS::NonnullGCPtr<DOM::NodeList> SVGSVGElement::get_enclosure_list(JS::NonnullGCPtr<Geometry::DOMRectReadOnly>, JS::GCPtr<SVGElement>) const
+{
+    dbgln("(STUBBED) SVGSVGElement::get_enclosure_list(). Called on: {}", debug_description());
+    return DOM::StaticNodeList::create(realm(), {});
+}
+
+bool SVGSVGElement::check_intersection(JS::NonnullGCPtr<SVGElement>, JS::NonnullGCPtr<Geometry::DOMRectReadOnly>) const
+{
+    dbgln("(STUBBED) SVGSVGElement::check_intersection(). Called on: {}", debug_description());
+    return false;
+}
+
+bool SVGSVGElement::check_enclosure(JS::NonnullGCPtr<SVGElement>, JS::NonnullGCPtr<Geometry::DOMRectReadOnly>) const
+{
+    dbgln("(STUBBED) SVGSVGElement::check_enclosure(). Called on: {}", debug_description());
+    return false;
+}
+
+void SVGSVGElement::deselect_all() const
+{
+    // This is equivalent to calling document.getSelection().removeAllRanges() on the document that this ‘svg’ element is in.
+    if (auto selection = document().get_selection())
+        selection->remove_all_ranges();
+}
+
+JS::NonnullGCPtr<SVGLength> SVGSVGElement::create_svg_length() const
+{
+    // A new, detached SVGLength object whose value is the unitless <number> 0.
+    return SVGLength::create(realm(), SVGLength::SVG_LENGTHTYPE_NUMBER, 0);
+}
+
+JS::NonnullGCPtr<Geometry::DOMPoint> SVGSVGElement::create_svg_point() const
+{
+    // A new, detached DOMPoint object whose coordinates are all 0.
+    return Geometry::DOMPoint::from_point(vm(), Geometry::DOMPointInit {});
+}
+
+JS::NonnullGCPtr<Geometry::DOMMatrix> SVGSVGElement::create_svg_matrix() const
+{
+    // A new, detached DOMMatrix object representing the identity matrix.
+    return Geometry::DOMMatrix::create(realm());
+}
+
+JS::NonnullGCPtr<Geometry::DOMRect> SVGSVGElement::create_svg_rect() const
+{
+    // A new, DOMRect object whose x, y, width and height are all 0.
+    return Geometry::DOMRect::construct_impl(realm(), 0, 0, 0, 0).release_value_but_fixme_should_propagate_errors();
+}
+
+JS::NonnullGCPtr<SVGTransform> SVGSVGElement::create_svg_transform() const
+{
+    return SVGTransform::create(realm());
 }
 
 }

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Bindings/HTMLMetaElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/Parser/ParsingContext.h>
@@ -29,7 +30,7 @@ HTMLMetaElement::~HTMLMetaElement() = default;
 void HTMLMetaElement::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
-    set_prototype(&Bindings::ensure_web_prototype<Bindings::HTMLMetaElementPrototype>(realm, "HTMLMetaElement"_fly_string));
+    WEB_SET_PROTOTYPE_FOR_INTERFACE(HTMLMetaElement);
 }
 
 Optional<HTMLMetaElement::HttpEquivAttributeState> HTMLMetaElement::http_equiv_state() const
@@ -64,7 +65,7 @@ void HTMLMetaElement::inserted()
         auto media = attribute(AttributeNames::media);
         if (media.has_value()) {
             auto query = parse_media_query(context, media.value());
-            if (!query->evaluate(document().window()))
+            if (document().window() && !query->evaluate(*document().window()))
                 return;
         }
 

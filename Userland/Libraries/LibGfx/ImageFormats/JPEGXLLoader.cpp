@@ -1719,7 +1719,7 @@ public:
         auto const height = m_channels[0].height();
 
         auto const orientation = static_cast<TIFF::Orientation>(metadata.orientation);
-        auto oriented_bitmap = TRY(ExifOrientedBitmap::create(BitmapFormat::BGRA8888, { width, height }, orientation));
+        auto oriented_bitmap = TRY(ExifOrientedBitmap::create(orientation, { width, height }, BitmapFormat::BGRA8888));
 
         auto const alpha_channel = metadata.alpha_channel();
 
@@ -1750,7 +1750,7 @@ public:
                         to_u8(m_channels[*alpha_channel].get(x, y)),
                     };
                 }();
-                oriented_bitmap.set_pixel(x, y, color);
+                oriented_bitmap.set_pixel(x, y, color.value());
             }
         }
 
