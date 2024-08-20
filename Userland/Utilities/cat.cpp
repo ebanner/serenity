@@ -16,16 +16,25 @@ struct LineTracker {
     bool display_line_number = true;
 };
 
-static void output_buffer_with_line_numbers(LineTracker& line_tracker, ReadonlyBytes buffer_span)
+static void output_buffer_with_line_numbers(LineTracker& line_tracker, ReadonlyBytes buffer_span, bool show_lines, bool squeeze_lines)
 {
+    int num_newlines = 0;
     for (auto const curr_value : buffer_span) {
-        if (line_tracker.display_line_number) {
+        if (show_lines && line_tracker.display_line_number) {
             out("{: >6}\t", line_tracker.line_count);
             line_tracker.line_count++;
             line_tracker.display_line_number = false;
         }
-        if (curr_value == '\n')
-            line_tracker.display_line_number = true;
+        if (curr_value == '\n') {
+            if (squeeze_lines) {
+                num_newlines++;
+                if (num_newlines > 2)
+                    continue;
+            }
+            if (show_lines)
+                line_tracker.display_line_number = true;
+        } else if (squeeze_lines)
+            num_newlines = 0;
         out("{:c}", curr_value);
     }
 }
@@ -36,11 +45,13 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
 
     Vector<StringView> paths;
     bool show_lines = false;
+    bool squeeze_lines = false;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("Concatenate files or pipes to stdout.");
     args_parser.add_positional_argument(paths, "File path", "path", Core::ArgsParser::Required::No);
     args_parser.add_option(show_lines, "Number all output lines", "number", 'n');
+    args_parser.add_option(squeeze_lines, "Squeeze output lines", "squeeze", 's');
     args_parser.parse(arguments);
 
     if (paths.is_empty())
@@ -65,8 +76,8 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     for (auto const& file : files) {
         while (!file->is_eof()) {
             auto const buffer_span = TRY(file->read_some(buffer));
-            if (show_lines) {
-                output_buffer_with_line_numbers(line_tracker, buffer_span);
+            if (show_lines || squeeze_lines) {
+                output_buffer_with_line_numbers(line_tracker, buffer_span, show_lines, squeeze_lines);
             } else {
                 out("{:s}", buffer_span);
             }
